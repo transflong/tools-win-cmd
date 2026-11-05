@@ -6,7 +6,7 @@
 $ScriptUrl   = 'https://tools.transflong.eu.cc'
 # Neu host script tren GitHub, doi thanh:
 # $ScriptUrl = 'https://raw.githubusercontent.com/<user>/<repo>/main/tools.ps1'
-$WaitSeconds = 300
+$WaitSeconds = 5
 
 # Nmap portable (tu upload zip len GitHub Releases cua ban, roi dien URL)
 $NmapPortableUrl = 'https://github.com/<user>/<repo>/releases/download/<tag>/nmap-portable.zip'
