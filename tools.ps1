@@ -828,17 +828,150 @@ function Win-LicenseCheck {
 }
 
 function Sys-HardwareInfo {
-    Draw-Header 'THONG TIN PHAN CUNG HE THONG'
-    $cs   = Get-CimInstance Win32_ComputerSystem
-    $bios = Get-CimInstance Win32_BIOS
-    $cpu  = Get-CimInstance Win32_Processor | Select-Object -First 1
-    $ram  = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB, 2)
+    [CmdletBinding()]
+    param()
 
-    Write-Host "  * Ten may      : $($cs.DNSHostName)" -ForegroundColor Cyan
-    Write-Host "  * Model        : $($cs.Manufacturer) $($cs.Model)" -ForegroundColor Cyan
-    Write-Host "  * Serial Number: $($bios.SerialNumber)" -ForegroundColor Yellow
-    Write-Host "  * CPU          : $($cpu.Name)" -ForegroundColor Cyan
-    Write-Host "  * RAM          : $ram GB" -ForegroundColor Cyan
+    # 1. Tính toán chiều rộng Console và lề để căn giữa bảng
+    $hostWidth = 80
+    try {
+        if ($Host.UI.RawUI.WindowSize.Width -gt 0) {
+            $hostWidth = $Host.UI.RawUI.WindowSize.Width
+        }
+    } catch {}
+
+    $col1Width = 22
+    $col2Width = 48
+    $boxWidth  = $col1Width + $col2Width + 7
+    $indent    = [math]::Max(0, [int](($hostWidth - $boxWidth) / 2))
+    $spaces    = " " * $indent
+
+    # Khung viền Unicode
+    $borderTop    = "$spaces┌" + ("─" * ($col1Width + 2)) + "┬" + ("─" * ($col2Width + 2)) + "┐"
+    $borderBottom = "$spaces└" + ("─" * ($col1Width + 2)) + "┴" + ("─" * ($col2Width + 2)) + "┘"
+    $borderHeader = "$spaces╞" + ("═" * ($col1Width + 2)) + "╪" + ("═" * ($col2Width + 2)) + "╡"
+
+    # Helper: In dòng thông tin key-value
+    function Write-Row {
+        param(
+            [string]$Key,
+            [string]$Value,
+            [ConsoleColor]$KeyColor = [ConsoleColor]::Cyan,
+            [ConsoleColor]$ValueColor = [ConsoleColor]::White
+        )
+        $kStr = if ($Key.Length -gt $col1Width) { $Key.Substring(0, $col1Width - 3) + "..." } else { $Key }
+        $vStr = if ($Value.Length -gt $col2Width) { $Value.Substring(0, $col2Width - 3) + "..." } else { $Value }
+
+        Write-Host "$spaces│ " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$($kStr.PadRight($col1Width))" -NoNewline -ForegroundColor $KeyColor
+        Write-Host " │ " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$($vStr.PadRight($col2Width))" -NoNewline -ForegroundColor $ValueColor
+        Write-Host " │" -ForegroundColor DarkGray
+    }
+
+    # Helper: In phân đoạn tiêu đề
+    function Write-Section {
+        param([string]$Title)
+        $totalInner = $col1Width + $col2Width + 3
+        $padded = " [ $Title ] ".PadRight($totalInner, "═")
+        $padded = $padded.PadLeft([int](($totalInner + $padded.Length)/2), "═")
+
+        Write-Host "$spaces╞" -NoNewline -ForegroundColor DarkGray
+        Write-Host "$padded" -NoNewline -ForegroundColor Yellow
+        Write-Host "╡" -ForegroundColor DarkGray
+    }
+
+    # 2. Thu thập dữ liệu phần cứng chi tiết
+    $cs   = Get-CimInstance Win32_ComputerSystem
+    $os   = Get-CimInstance Win32_OperatingSystem
+    $bios = Get-CimInstance Win32_BIOS
+    $mb   = Get-CimInstance Win32_BaseBoard
+    $cpu  = Get-CimInstance Win32_Processor | Select-Object -First 1
+
+    # RAM Details
+    $ramModules = Get-CimInstance Win32_PhysicalMemory
+    $ramSlotsObj = Get-CimInstance Win32_PhysicalMemoryArray | Select-Object -ExpandProperty MemoryDevices -ErrorAction SilentlyContinue
+    $totalSlots = if ($ramSlotsObj) { ($ramSlotsObj | Measure-Object -Sum).Sum } else { $ramModules.Count }
+    $usedSlots = $ramModules.Count
+    $ramTotalGB = [math]::Round(($ramModules | Measure-Object Capacity -Sum).Sum / 1GB, 2)
+    $ramSpeed = ($ramModules | Select-Object -ExpandProperty Speed | Sort-Object -Descending | Select-Object -First 1)
+    
+    $ramTypeRaw = $ramModules | Select-Object -First 1 -ExpandProperty SMBIOSMemoryType
+    if (-not $ramTypeRaw -or $ramTypeRaw -eq 0) { $ramTypeRaw = $ramModules | Select-Object -First 1 -ExpandProperty MemoryType }
+    $ramType = switch ($ramTypeRaw) {
+        20 { "DDR" } 21 { "DDR2" } 24 { "DDR3" } 26 { "DDR4" } 30 { "LPDDR4" } 34 { "DDR5" } 35 { "LPDDR5" } default { "DDR / Standard" }
+    }
+
+    # Cache & CPU Clock
+    $l2MB = if ($cpu.L2CacheSize) { "$([math]::Round($cpu.L2CacheSize / 1024, 2)) MB" } else { "N/A" }
+    $l3MB = if ($cpu.L3CacheSize) { "$([math]::Round($cpu.L3CacheSize / 1024, 2)) MB" } else { "N/A" }
+    $maxClock = "$([math]::Round($cpu.MaxClockSpeed / 1000, 2)) GHz ($($cpu.MaxClockSpeed) MHz)"
+
+    # GPU & Storage
+    $gpus  = Get-CimInstance Win32_VideoController
+    $disks = Get-CimInstance Win32_DiskDrive
+
+    # 3. Xuất bảng giao diện
+    Write-Host ""
+    Write-Host $borderTop -ForegroundColor DarkGray
+    
+    # Title Header
+    $titleStr = "THONG TIN PHAN CUNG HE THONG (CPU-Z)"
+    $titlePadded = $titleStr.PadRight($col1Width + $col2Width + 3)
+    $titlePadded = $titlePadded.PadLeft([int](($col1Width + $col2Width + 3 + $titlePadded.Length)/2))
+    Write-Host "$spaces│ " -NoNewline -ForegroundColor DarkGray
+    Write-Host "$titlePadded" -NoNewline -ForegroundColor Green
+    Write-Host " │" -ForegroundColor DarkGray
+
+    # SYSTEM & MOTHERBOARD
+    Write-Section "BO MACH & HE THONG"
+    Write-Row "Computer Name" "$($cs.DNSHostName)"
+    Write-Row "OS Version" "$($os.Caption) ($($os.BuildNumber))"
+    Write-Row "System Model" "$($cs.Manufacturer) $($cs.Model)"
+    Write-Row "Serial Number" "$($bios.SerialNumber)" -KeyColor Yellow -ValueColor Yellow
+    Write-Row "Motherboard" "$($mb.Manufacturer) $($mb.Product) (Rev $($mb.Version))"
+    $biosDate = if ($bios.ReleaseDate -is [datetime]) { $bios.ReleaseDate.ToString('yyyy-MM-dd') } else { $bios.ReleaseDate }
+    Write-Row "BIOS Version" "$($bios.SMBIOSBIOSVersion) ($biosDate)"
+
+    # CPU
+    Write-Section "BO VI XULY (CPU)"
+    Write-Row "Processor" "$($cpu.Name.Trim())"
+    Write-Row "Socket / Package" "$($cpu.SocketDesignation)"
+    Write-Row "Cores / Threads" "$($cpu.NumberOfCores) Cores / $($cpu.NumberOfLogicalProcessors) Threads"
+    Write-Row "Max Clock Speed" "$maxClock"
+    Write-Row "L2 Cache" "$l2MB"
+    Write-Row "L3 Cache" "$l3MB"
+
+    # RAM
+    Write-Section "BO NHO (RAM)"
+    Write-Row "Total Capacity" "$ramTotalGB GB"
+    Write-Row "Memory Type" "$ramType"
+    Write-Row "DRAM Speed" "$ramSpeed MHz"
+    Write-Row "Slots Occupied" "$usedSlots / $totalSlots slots"
+
+    # GPU
+    Write-Section "CARD DO HOA (GPU)"
+    $gpuIdx = 1
+    foreach ($gpu in $gpus) {
+        $vramGB = if ($gpu.AdapterRAM) { "$([math]::Round($gpu.AdapterRAM / 1GB, 2)) GB" } else { "N/A" }
+        $label = if ($gpus.Count -gt 1) { "GPU #$gpuIdx" } else { "GPU Model" }
+        Write-Row $label "$($gpu.Name)"
+        Write-Row "  └─ Driver & VRAM" "v$($gpu.DriverVersion) | VRAM: $vramGB" -KeyColor Gray
+        $gpuIdx++
+    }
+
+    # STORAGE
+    Write-Section "O CUNG (STORAGE)"
+    $diskIdx = 1
+    foreach ($disk in $disks) {
+        $diskGB = if ($disk.Size) { [math]::Round($disk.Size / 1GB, 2) } else { 0 }
+        $label = "Disk #$diskIdx"
+        Write-Row $label "$($disk.Model)"
+        Write-Row "  └─ Specs" "$diskGB GB ($($disk.InterfaceType) / $($disk.MediaType))" -KeyColor Gray
+        $diskIdx++
+    }
+
+    Write-Host $borderBottom -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 function Fix-PrintSpooler {
