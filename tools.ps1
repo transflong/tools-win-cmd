@@ -1,15 +1,21 @@
 # ============================================================
-#  TOOLS WIN CMD - bo cong cu Windows tu dong
-#  Chay:  irm https://tools.transflong.eu.cc | iex
+#  TOOLS WIN CMD PRO - Bo cong cu IT Systems & Support
+#  Chay: irm https://tools.transflong.eu.cc | iex
 # ============================================================
 
 $ScriptUrl   = 'https://tools.transflong.eu.cc'
-$WaitSeconds = 300    # thoi gian cho giua cac buoc (300 = 5 phut)
+# Neu host script tren GitHub, doi thanh:
+# $ScriptUrl = 'https://raw.githubusercontent.com/<user>/<repo>/main/tools.ps1'
+$WaitSeconds = 300
+
+# Nmap portable (tu upload zip len GitHub Releases cua ban, roi dien URL)
+$NmapPortableUrl = 'https://github.com/<user>/<repo>/releases/download/<tag>/nmap-portable.zip'
+$NmapPortableDir = "$env:ProgramData\ITTools\nmap"
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 # ------------------------------------------------------------
-#  Ep quyen Administrator
+# Ep quyen Administrator
 # ------------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -24,36 +30,76 @@ if (-not $isAdmin) {
             Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
         }
     } catch {
-        Write-Host 'Ban da tu choi quyen Administrator. Tool khong the chay.' -ForegroundColor Red
+        Write-Host 'Tu choi quyen Administrator. Tool khong the chay.' -ForegroundColor Red
     }
     return
 }
 
-$Host.UI.RawUI.WindowTitle = 'Tools Win CMD (Administrator)'
+$Host.UI.RawUI.WindowTitle = 'IT SYSTEM TOOLKIT (Administrator)'
 
 # ------------------------------------------------------------
-#  Ham tien ich
+# Giao dien (khung can giua) & Ham tien ich
 # ------------------------------------------------------------
-function Write-Title($text) {
+$script:BoxWidth = 62
+
+function Get-Pad([int]$w = $script:BoxWidth) {
+    try { $cw = $Host.UI.RawUI.WindowSize.Width } catch { $cw = 120 }
+    return (' ' * [math]::Max(0, [math]::Floor(($cw - $w) / 2)))
+}
+
+function Draw-Header([string]$title) {
     Clear-Host
-    Write-Host '==============================================' -ForegroundColor Cyan
-    Write-Host ("  {0}" -f $text)                               -ForegroundColor Cyan
-    Write-Host '==============================================' -ForegroundColor Cyan
+    $inner = $script:BoxWidth - 2
+    $line  = '+' + ('-' * $inner) + '+'
+    if ($title.Length -gt $inner - 2) { $title = $title.Substring(0, $inner - 2) }
+    $left  = [math]::Floor(($inner - $title.Length) / 2)
+    $mid   = (' ' * $left) + $title + (' ' * ($inner - $left - $title.Length))
+    $pad   = Get-Pad
+
+    Write-Host ''
+    Write-Host ($pad + $line) -ForegroundColor Cyan
+    Write-Host $pad -NoNewline
+    Write-Host '|' -NoNewline -ForegroundColor Cyan
+    Write-Host $mid -NoNewline -ForegroundColor White -BackgroundColor DarkBlue
+    Write-Host '|' -ForegroundColor Cyan
+    Write-Host ($pad + $line) -ForegroundColor Cyan
     Write-Host ''
 }
-function Write-Ok($m)   { Write-Host "[OK]  $m"  -ForegroundColor Green }
-function Write-Warn($m) { Write-Host "[!]   $m"  -ForegroundColor Yellow }
-function Write-Err($m)  { Write-Host "[LOI] $m"  -ForegroundColor Red }
-function Write-Step($m) { Write-Host "`n>> $m"   -ForegroundColor Cyan }
-function Pause-Back     { Write-Host ''; Read-Host 'Nhan Enter de quay lai menu' | Out-Null }
-function Confirm-YN($q) { return ((Read-Host "$q (Y/N)") -match '^[yY]') }
+
+function Write-BoxSep([string]$label = '') {
+    $inner = $script:BoxWidth - 2
+    $txt = if ($label) { "--[ $label ]" } else { '' }
+    Write-Host ((Get-Pad) + '+' + $txt.PadRight($inner, '-') + '+') -ForegroundColor DarkGray
+}
+
+function Write-BoxItem([string]$text, [string]$color = 'White') {
+    $inner = $script:BoxWidth - 4
+    if ($text.Length -gt $inner) { $text = $text.Substring(0, $inner) }
+    Write-Host (Get-Pad) -NoNewline
+    Write-Host '| ' -NoNewline -ForegroundColor DarkGray
+    Write-Host $text.PadRight($inner) -NoNewline -ForegroundColor $color
+    Write-Host ' |' -ForegroundColor DarkGray
+}
+
+function Read-Choice([string]$prompt = 'Lua chon cua ban') {
+    Write-Host ''
+    Write-Host ((Get-Pad) + "  $prompt > ") -NoNewline -ForegroundColor Yellow
+    return (Read-Host)
+}
+
+function Write-Ok($m)   { Write-Host "  [OK] $m"  -ForegroundColor Green }
+function Write-Warn($m) { Write-Host "  [!] WARN: $m" -ForegroundColor Yellow }
+function Write-Err($m)  { Write-Host "  [X] ERR: $m" -ForegroundColor Red }
+function Write-Step($m) { Write-Host "`n  -> $m" -ForegroundColor Cyan }
+function Pause-Back     { Write-Host ''; Read-Host '  Bam Enter de quay lai menu' | Out-Null }
+function Confirm-YN($q) { return ((Read-Host "  $q (Y/N)") -match '^[yY]') }
 
 function Wait-Countdown([int]$Seconds, [string]$Label) {
-    Write-Host "$Label - nhan S de bo qua cho" -ForegroundColor DarkGray
+    Write-Host "  $Label - nhan S de bo qua cho" -ForegroundColor DarkGray
     $end = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $end) {
         $left = [int][math]::Ceiling(($end - (Get-Date)).TotalSeconds)
-        Write-Host -NoNewline ("`r  Con lai: {0:00}:{1:00}   " -f [math]::Floor($left / 60), ($left % 60))
+        Write-Host -NoNewline ("`r    Con lai: {0:00}:{1:00}   " -f [math]::Floor($left / 60), ($left % 60))
         try {
             if ([Console]::KeyAvailable) {
                 $k = [Console]::ReadKey($true)
@@ -81,9 +127,9 @@ function Clear-Folder($path) {
     }
 }
 
-# ============================================================
-#  1. NETWORK FIX
-# ============================================================
+# ------------------------------------------------------------
+# 1. NETWORK TOOLS
+# ------------------------------------------------------------
 function Select-PhysicalNic {
     $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
     if ($nics.Count -eq 0) { $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue) }
@@ -92,21 +138,20 @@ function Select-PhysicalNic {
         Write-Ok ("Tu dong chon: {0} ({1})" -f $nics[0].Name, $nics[0].InterfaceDescription)
         return $nics
     }
-    Write-Host 'Tim thay nhieu card mang:'
+    Write-Host '  Tim thay nhieu card mang:'
     for ($i = 0; $i -lt $nics.Count; $i++) {
-        Write-Host (" {0}. {1}  [{2}]  {3}" -f ($i + 1), $nics[$i].Name, $nics[$i].Status, $nics[$i].InterfaceDescription)
+        Write-Host ("  {0}. {1}  [{2}]  {3}" -f ($i + 1), $nics[$i].Name, $nics[$i].Status, $nics[$i].InterfaceDescription)
     }
-    $c = Read-Host 'Chon so (Enter = tat ca, 0 = huy)'
+    $c = Read-Host '  Chon so (Enter = tat ca, 0 = huy)'
     if ($c -eq '0') { return @() }
     if ($c -match '^\d+$' -and [int]$c -ge 1 -and [int]$c -le $nics.Count) { return @($nics[[int]$c - 1]) }
     return $nics
 }
 
-# 1.1 Reset IP
 function Net-ResetIP {
-    Write-Title 'Reset IP'
-    Write-Host 'Thu tu: release -> cho -> flushdns -> cho -> registerdns -> cho -> renew'
-    Write-Host ("Moi lan cho: {0} giay. Mang se MAT trong luc chay." -f $WaitSeconds) -ForegroundColor Yellow
+    Draw-Header 'RESET IP & FLUSH DNS'
+    Write-Host '  Thu tu: release -> cho -> flushdns -> cho -> registerdns -> cho -> renew'
+    Write-Host ("  Moi lan cho: {0} giay. Mang se MAT trong luc chay." -f $WaitSeconds) -ForegroundColor Yellow
     if ($env:SESSIONNAME -like 'RDP*') {
         Write-Warn 'Ban dang ket noi qua RDP - release IP se lam MAT ket noi cua ban!'
     }
@@ -135,14 +180,13 @@ function Net-ResetIP {
         Format-Table InterfaceAlias, IPAddress -AutoSize
 }
 
-# 1.2 Refresh Network Interface
 function Net-RefreshNic {
-    Write-Title 'Refresh Network Interface'
+    Draw-Header 'REFRESH NETWORK INTERFACE'
     $sel = @(Select-PhysicalNic)
     if ($sel.Count -eq 0) { return }
     $names = @($sel | ForEach-Object { $_.Name })
 
-    Write-Host ("Se tat NIC, cho {0} giay roi bat lai." -f $WaitSeconds) -ForegroundColor Yellow
+    Write-Host ("  Se tat NIC, cho {0} giay roi bat lai." -f $WaitSeconds) -ForegroundColor Yellow
     if (-not (Confirm-YN 'Tiep tuc?')) { return }
 
     try {
@@ -153,7 +197,6 @@ function Net-RefreshNic {
         Wait-Countdown $WaitSeconds 'Cho truoc khi bat lai NIC'
     }
     finally {
-        # luon bat lai NIC, ke ca khi bam Ctrl+C
         foreach ($n in $names) {
             Write-Step "Bat NIC: $n"
             cmd /c "netsh interface set interface name=`"$n`" admin=enabled" | Out-Null
@@ -164,11 +207,10 @@ function Net-RefreshNic {
     Get-NetAdapter -Name $names -ErrorAction SilentlyContinue | Format-Table Name, Status, LinkSpeed -AutoSize
 }
 
-# 1.3 Reconnect Network Drive
 function Net-ReconnectDrives {
-    Write-Title 'Reconnect Network Drive'
-    Write-Host 'O mang map trong phien Admin KHAC phien nguoi dung thuong (UAC),' -ForegroundColor DarkGray
-    Write-Host 'nen tool se chay phan nay duoi quyen nguoi dung thuong de Explorer thay duoc.' -ForegroundColor DarkGray
+    Draw-Header 'RECONNECT NETWORK DRIVE'
+    Write-Host '  O mang map trong phien Admin KHAC phien nguoi dung thuong (UAC),' -ForegroundColor DarkGray
+    Write-Host '  nen tool se chay phan nay duoi quyen nguoi dung thuong de Explorer thay duoc.' -ForegroundColor DarkGray
     Write-Host ''
 
     $child = @'
@@ -232,7 +274,6 @@ $out | Set-Content $log -Encoding UTF8
     Remove-Item $childPath, $logPath, $donePath -Force -ErrorAction SilentlyContinue
 }
 
-# 1.4 Fix route VPN
 function Resolve-Ipv4($hostOrIp) {
     if ($hostOrIp -match '^\d{1,3}(\.\d{1,3}){3}$') { return $hostOrIp }
     try {
@@ -243,9 +284,8 @@ function Resolve-Ipv4($hostOrIp) {
 }
 
 function Net-FixVpnRoute {
-    Write-Title 'Fix route VPN'
+    Draw-Header 'FIX ROUTE VPN'
 
-    # --- 1. Tim VPN dang ket noi ---
     $vpnAlias  = $null
     $vpnServer = $null
 
@@ -271,7 +311,6 @@ function Net-FixVpnRoute {
         Write-Warn 'Day la VPN cua ben thu 3, khong tu doc duoc dia chi may chu.'
     }
 
-    # --- 2. Thong tin card VPN ---
     $vpnCfg = Get-NetIPConfiguration -InterfaceAlias $vpnAlias -ErrorAction SilentlyContinue
     if (-not $vpnCfg -or -not $vpnCfg.IPv4Address) {
         Write-Err "Khong lay duoc IP cua card VPN '$vpnAlias' (VPN chua nhan IP?)."
@@ -280,16 +319,14 @@ function Net-FixVpnRoute {
     $vpnIp  = ($vpnCfg.IPv4Address | Select-Object -First 1).IPAddress
     $vpnIdx = $vpnCfg.InterfaceIndex
 
-    # --- 3. IP may chu VPN ---
     $serverIp = $null
     if ($vpnServer) { $serverIp = Resolve-Ipv4 $vpnServer }
     if (-not $serverIp) {
-        $inp = Read-Host 'Nhap IP hoac hostname may chu VPN'
+        $inp = Read-Host '  Nhap IP hoac hostname may chu VPN'
         if ($inp) { $serverIp = Resolve-Ipv4 $inp.Trim() }
     }
     if (-not $serverIp) { Write-Err 'Khong xac dinh duoc IP may chu VPN.'; return }
 
-    # --- 4. Card LAN vat ly + gateway ---
     $physIdx = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.ifIndex })
     $lan = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
         Where-Object { $physIdx -contains $_.InterfaceIndex -and $_.IPv4DefaultGateway -and $_.IPv4Address } |
@@ -307,7 +344,6 @@ function Net-FixVpnRoute {
     Write-Host ("  LAN vat ly : {0}  | IP {1}  | Gateway {2}  | IfIndex {3}" -f $lan.InterfaceAlias, $lanIp, $lanGw, $lanIdx)
     Write-Host ''
 
-    # --- 5. Them route toi may chu VPN qua Gateway LAN ---
     Write-Step ("Them route {0}/32 -> Gateway {1} (qua {2})" -f $serverIp, $lanGw, $lan.InterfaceAlias)
     try {
         Get-NetRoute -DestinationPrefix "$serverIp/32" -ErrorAction SilentlyContinue |
@@ -317,36 +353,162 @@ function Net-FixVpnRoute {
         Write-Ok 'Da them route.'
         Get-NetRoute -DestinationPrefix "$serverIp/32" -ErrorAction SilentlyContinue |
             Format-Table ifIndex, DestinationPrefix, NextHop, RouteMetric -AutoSize
-        Write-Host 'Luu y: route nay mat sau khi khoi dong lai may.' -ForegroundColor DarkGray
+        Write-Host '  Luu y: route nay mat sau khi khoi dong lai may.' -ForegroundColor DarkGray
     } catch {
         Write-Err ("Khong them duoc route: {0}" -f $_.Exception.Message)
     }
 }
 
+function Net-Diagnostics {
+    Draw-Header 'KIEM TRA KET NOI MANG'
+    $target = Read-Host '  Nhap IP/Domain can test (mac dinh: 8.8.8.8)'
+    if ([string]::IsNullOrWhiteSpace($target)) { $target = '8.8.8.8' }
+
+    Write-Step "Pinging $target..."
+    Test-Connection -ComputerName $target -Count 4
+
+    Write-Step "Tracert $target..."
+    Test-NetConnection -ComputerName $target -TraceRoute
+}
+
+function Net-PortCheck {
+    Draw-Header 'CONG DANG KET NOI (NETSTAT)'
+    Get-NetTCPConnection | Where-Object State -eq 'Established' |
+        Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess -First 15 |
+        Format-Table -AutoSize
+}
+
+# ---------------- NMAP ----------------
+function Get-NmapPath {
+    $c = Get-Command nmap.exe -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    foreach ($p in @(
+        "$env:ProgramFiles\Nmap\nmap.exe",
+        "${env:ProgramFiles(x86)}\Nmap\nmap.exe"
+    )) { if (Test-Path $p) { return $p } }
+    $portable = Get-ChildItem $NmapPortableDir -Recurse -Filter nmap.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($portable) { return $portable.FullName }
+    return $null
+}
+
+function Install-Nmap {
+    Write-Step 'Nmap chua co, dang cai dat...'
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Insecure.Nmap -e --silent --accept-package-agreements --accept-source-agreements
+        $p = Get-NmapPath
+        if ($p) { return $p }
+        Write-Warn 'winget khong cai duoc, thu tai ban portable...'
+    }
+    if ($NmapPortableUrl -match '<user>') {
+        Write-Err 'Chua cau hinh $NmapPortableUrl (repo GitHub cua ban).'
+        return $null
+    }
+    try {
+        New-Item -ItemType Directory -Path $NmapPortableDir -Force | Out-Null
+        $zip = Join-Path $env:TEMP 'nmap-portable.zip'
+        Invoke-WebRequest -Uri $NmapPortableUrl -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $NmapPortableDir -Force
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        return (Get-NmapPath)
+    } catch {
+        Write-Err ("Tai nmap that bai: {0}" -f $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-LocalCidr {
+    $cfg = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPv4DefaultGateway -and $_.IPv4Address } | Select-Object -First 1
+    if (-not $cfg) { return $null }
+    $a = $cfg.IPv4Address | Select-Object -First 1
+    return ('{0}/{1}' -f $a.IPAddress, $a.PrefixLength)
+}
+
+function Net-Nmap {
+    Draw-Header 'NMAP - QUET MANG'
+    $nmap = Get-NmapPath
+    if (-not $nmap) { $nmap = Install-Nmap }
+    if (-not $nmap) { return }
+    Write-Ok "Nmap: $nmap"
+
+    Write-Host ''
+    Write-Host '  Chi quet he thong/mang ban duoc phep quan tri.' -ForegroundColor Yellow
+    $cidr = Get-LocalCidr
+    Write-Host ''
+    Write-BoxSep 'Kieu quet'
+    Write-BoxItem '[1] Tim thiet bi dang online trong LAN (ping sweep)'
+    Write-BoxItem '[2] Quet nhanh cac port pho bien (-F)'
+    Write-BoxItem '[3] Quet port + phien ban dich vu (-sV)'
+    Write-BoxItem '[4] Tu nhap tham so nmap'
+    Write-BoxItem '[0] Huy' 'Red'
+    Write-BoxSep
+    $mode = Read-Choice 'Chon'
+    if ($mode -eq '0' -or [string]::IsNullOrWhiteSpace($mode)) { return }
+
+    $defaultTarget = if ($cidr) { $cidr } else { '192.168.1.0/24' }
+    $target = Read-Host ("  Nhap IP / domain / dai mang (Enter = {0})" -f $defaultTarget)
+    if ([string]::IsNullOrWhiteSpace($target)) { $target = $defaultTarget }
+    if ($target -notmatch '^[A-Za-z0-9\.\-:/,\s]+$') { Write-Err 'Target chua ky tu khong hop le.'; return }
+
+    $targets = @($target -split '\s+' | Where-Object { $_ })
+
+    switch ($mode) {
+        '1' { $nmapArgs = @('-sn') + $targets }
+        '2' { $nmapArgs = @('-F', '-T4') + $targets }
+        '3' { $nmapArgs = @('-sV', '-T4') + $targets }
+        '4' {
+            $custom = Read-Host '  Nhap tham so (VD: -p 22,80,443 -sV)'
+            $nmapArgs = @($custom -split '\s+' | Where-Object { $_ }) + $targets
+        }
+        default { Write-Warn 'Lua chon khong hop le.'; return }
+    }
+
+    $outFile = $null
+    if (Confirm-YN 'Luu ket qua ra Desktop?') {
+        $outFile = Join-Path $env:USERPROFILE ("Desktop\nmap_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+        $nmapArgs += @('-oN', $outFile)
+    }
+
+    Write-Step ("nmap {0}" -f ($nmapArgs -join ' '))
+    & $nmap @nmapArgs
+
+    if ($outFile -and (Test-Path $outFile)) { Write-Ok "Da luu: $outFile" }
+}
+
 function Menu-Network {
     while ($true) {
-        Write-Title 'NETWORK FIX'
-        Write-Host ' 1. Reset IP'
-        Write-Host ' 2. Refresh Network Interface'
-        Write-Host ' 3. Reconnect Network Drive'
-        Write-Host ' 4. Fix route VPN'
-        Write-Host ' 0. Quay lai'
-        Write-Host ''
-        switch (Read-Host 'Chon') {
-            '1' { Net-ResetIP;          Pause-Back }
-            '2' { Net-RefreshNic;       Pause-Back }
-            '3' { Net-ReconnectDrives;  Pause-Back }
-            '4' { Net-FixVpnRoute;      Pause-Back }
+        Draw-Header 'NETWORK FIX & DIAGNOSTICS'
+        Write-BoxSep 'Chuc nang chinh'
+        Write-BoxItem '[1] Reset IP & Flush DNS (Go nghen mang)'
+        Write-BoxItem '[2] Reset Network Card (Disable/Enable)'
+        Write-BoxItem '[3] Reconnect Network Drive (quyen User)'
+        Write-BoxItem '[4] Fix Route VPN (Dinh tuyen cho VPN)'
+        Write-BoxSep 'Chuan doan IT'
+        Write-BoxItem '[5] Ping / Tracert kiem tra ket noi' 'Yellow'
+        Write-BoxItem '[6] Cong dang mo (Open Ports & Connections)' 'Yellow'
+        Write-BoxItem '[7] Nmap - Quet thiet bi / port trong mang' 'Cyan'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
+        Write-BoxSep
+
+        switch (Read-Choice) {
+            '1' { Net-ResetIP; Pause-Back }
+            '2' { Net-RefreshNic; Pause-Back }
+            '3' { Net-ReconnectDrives; Pause-Back }
+            '4' { Net-FixVpnRoute; Pause-Back }
+            '5' { Net-Diagnostics; Pause-Back }
+            '6' { Net-PortCheck; Pause-Back }
+            '7' { Net-Nmap; Pause-Back }
             '0' { return }
         }
     }
 }
 
-# ============================================================
-#  2. CLEANUP
-# ============================================================
+# ------------------------------------------------------------
+# 2. SYSTEM CLEANUP & REPAIR
+# ------------------------------------------------------------
 function Clean-Quick {
-    Write-Title 'Clean up - Don nhanh'
+    Draw-Header 'CLEAN UP - DON NHANH'
     $before = Get-FreeC
 
     Write-Step 'File tam nguoi dung';        Clear-Folder $env:TEMP
@@ -377,9 +539,9 @@ function Clean-Quick {
 }
 
 function Clean-Deep {
-    Write-Title 'Clean up - Don sau'
-    Write-Host 'Gom: file tam moi user, crash dump, shader cache, Delivery Optimization,'
-    Write-Host 'va DISM StartComponentCleanup (co the mat vai phut).' -ForegroundColor Yellow
+    Draw-Header 'CLEAN UP - DON SAU'
+    Write-Host '  Gom: file tam moi user, crash dump, shader cache, Delivery Optimization,'
+    Write-Host '  va DISM StartComponentCleanup (co the mat vai phut).' -ForegroundColor Yellow
     if (-not (Confirm-YN 'Tiep tuc?')) { return }
     $before = Get-FreeC
 
@@ -415,8 +577,8 @@ function Clean-Deep {
 }
 
 function Clean-BrowserApp {
-    Write-Title 'Clean up - Cache trinh duyet va ung dung'
-    Write-Host 'Chi xoa cache. KHONG xoa cookie, mat khau, lich su, dang nhap.' -ForegroundColor Green
+    Draw-Header 'CLEAN UP - CACHE BROWSER & TEAMS'
+    Write-Host '  Chi xoa cache. KHONG xoa cookie, mat khau, lich su, dang nhap.' -ForegroundColor Green
     if (Confirm-YN 'Dong Chrome/Edge/Brave/Firefox/Teams dang mo de xoa sach hon?') {
         'chrome', 'msedge', 'brave', 'firefox', 'Teams', 'ms-teams' | ForEach-Object {
             Stop-Process -Name $_ -Force -ErrorAction SilentlyContinue
@@ -444,7 +606,7 @@ function Clean-BrowserApp {
     Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory -ErrorAction SilentlyContinue |
         ForEach-Object { Clear-Folder (Join-Path $_.FullName 'cache2') }
 
-    Write-Step 'Office file cache va Teams (ban cu)'
+    Write-Step 'Office file cache va Teams'
     Clear-Folder "$env:LOCALAPPDATA\Microsoft\Office\16.0\OfficeFileCache"
     foreach ($s in 'Cache', 'Code Cache', 'GPUCache', 'blob_storage', 'tmp', 'Service Worker\CacheStorage') {
         Clear-Folder (Join-Path "$env:APPDATA\Microsoft\Teams" $s)
@@ -453,9 +615,78 @@ function Clean-BrowserApp {
     Show-Freed $before
 }
 
+function Clean-BrowserAppWithBackup {
+    Draw-Header 'DON CACHE BROWSER (CO BACKUP PROFILE)'
+
+    $backupRoot = "$env:USERPROFILE\Desktop\Browser_Backups_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    Write-Host "  [i] Du lieu backup se duoc luu tai: $backupRoot" -ForegroundColor Cyan
+
+    if (Confirm-YN 'Dong Chrome/Edge/Brave/Firefox truoc khi Backup & Xoa?') {
+        'chrome', 'msedge', 'brave', 'firefox', 'Teams', 'ms-teams' | ForEach-Object {
+            Stop-Process -Name $_ -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    $before = Get-FreeC
+
+    $browsers = @(
+        @{ Name = 'Chrome'; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data" },
+        @{ Name = 'Edge';   Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" },
+        @{ Name = 'Brave';  Path = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" }
+    )
+
+    $importantFiles = @('Bookmarks', 'History', 'Favicons', 'Login Data', 'Web Data', 'Preferences')
+    $cacheSubs = @('Cache', 'Code Cache', 'GPUCache', 'GrShaderCache', 'ShaderCache', 'Service Worker\CacheStorage', 'Service Worker\ScriptCache')
+
+    foreach ($b in $browsers) {
+        if (Test-Path $b.Path) {
+            Write-Step "Dang xu ly trinh duyet: $($b.Name)"
+            $profiles = Get-ChildItem $b.Path -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^(Default|Profile \d+|Guest Profile)$' }
+
+            foreach ($p in $profiles) {
+                $destDir = Join-Path $backupRoot "$($b.Name)\$($p.Name)"
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+                foreach ($file in $importantFiles) {
+                    $srcFile = Join-Path $p.FullName $file
+                    if (Test-Path $srcFile) {
+                        Copy-Item -Path $srcFile -Destination $destDir -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                Write-Ok "Da backup du lieu cot loi ($($p.Name))"
+
+                foreach ($s in $cacheSubs) {
+                    Clear-Folder (Join-Path $p.FullName $s)
+                }
+            }
+        }
+    }
+
+    $ffPath = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+    if (Test-Path $ffPath) {
+        Write-Step 'Dang xu ly Firefox'
+        Get-ChildItem $ffPath -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $ffBackupDir = Join-Path $backupRoot "Firefox\$($_.Name)"
+            New-Item -ItemType Directory -Path $ffBackupDir -Force | Out-Null
+            if (Test-Path "$($_.FullName)\places.sqlite") {
+                Copy-Item -Path "$($_.FullName)\places.sqlite" -Destination $ffBackupDir -Force -ErrorAction SilentlyContinue
+                Write-Ok 'Da backup Bookmarks/History Firefox'
+            }
+            Clear-Folder (Join-Path $_.FullName 'cache2')
+        }
+    }
+
+    Show-Freed $before
+    Write-Host ''
+    Write-Ok 'Hoan tat! Thu muc backup tai Desktop:'
+    Write-Host "  -> $backupRoot" -ForegroundColor Yellow
+}
+
 function Clean-Repair {
-    Write-Title 'Clean up - Kiem tra va sua file he thong'
-    Write-Host 'Chay DISM RestoreHealth roi sfc /scannow. Co the mat 10-30 phut.' -ForegroundColor Yellow
+    Draw-Header 'KIEM TRA & SUA FILE HE THONG'
+    Write-Host '  Chay DISM RestoreHealth roi sfc /scannow. Co the mat 10-30 phut.' -ForegroundColor Yellow
     if (-not (Confirm-YN 'Tiep tuc?')) { return }
     Write-Step 'DISM /Online /Cleanup-Image /RestoreHealth'
     dism.exe /Online /Cleanup-Image /RestoreHealth
@@ -463,15 +694,23 @@ function Clean-Repair {
     sfc.exe /scannow
 }
 
+function Disk-Chkdsk {
+    Draw-Header 'KIEM TRA O DIA (CHKDSK)'
+    Write-Warn 'Che do Read-Only: chi quet doc loi o C:, khong sua.'
+    if (Confirm-YN 'Ban co muon quet doc loi o C (Read-Only)?') {
+        chkdsk.exe C:
+    }
+}
+
 function Show-DiskUsage {
-    Write-Title 'Clean up - Thu muc chiem nhieu dung luong'
-    Write-Host 'Dang quet, co the mat 1-3 phut...' -ForegroundColor DarkGray
+    Draw-Header 'FOLDER CHIEM NHIEU DUNG LUONG'
+    Write-Host '  Dang quet, co the mat 1-3 phut...' -ForegroundColor DarkGray
     function Top-Folders($root) {
-        Write-Host "`nTop thu muc trong $root" -ForegroundColor Cyan
+        Write-Host "`n  Top thu muc trong $root" -ForegroundColor Cyan
         Get-ChildItem $root -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
             ForEach-Object {
-                Write-Host -NoNewline ("`r  Dang quet: {0}                    " -f $_.Name)
+                Write-Host -NoNewline ("`r    Dang quet: {0,-50}" -f $_.Name)
                 $sum = (Get-ChildItem $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
                 [pscustomobject]@{ Folder = $_.FullName; GB = [math]::Round($sum / 1GB, 2) }
             } | Sort-Object GB -Descending | Select-Object -First 12 | Format-Table -AutoSize
@@ -482,30 +721,38 @@ function Show-DiskUsage {
 
 function Menu-Cleanup {
     while ($true) {
-        Write-Title 'CLEANUP'
-        Write-Host ' 1. Don nhanh      (temp, prefetch, update cache, thumbnail, DNS, thung rac)'
-        Write-Host ' 2. Don sau        (+ temp moi user, crash dump, shader cache, WinSxS)'
-        Write-Host ' 3. Cache trinh duyet va ung dung (Chrome, Edge, Firefox, Office, Teams)'
-        Write-Host ' 4. Kiem tra va sua file he thong (DISM + SFC)'
-        Write-Host ' 5. Xem thu muc chiem nhieu dung luong'
-        Write-Host ' 0. Quay lai'
-        Write-Host ''
-        switch (Read-Host 'Chon') {
-            '1' { Clean-Quick;      Pause-Back }
-            '2' { Clean-Deep;       Pause-Back }
+        Draw-Header 'DON DEP & SUA LOI HE THONG'
+        Write-BoxSep 'Toi uu dung luong'
+        Write-BoxItem '[1] Don nhanh (Temp, Prefetch, DNS, Recycle Bin)'
+        Write-BoxItem '[2] Don sau (Crash Dumps, WinSxS, Temp Users)'
+        Write-BoxItem '[3] Chi xoa Cache Browsers & Teams/Office'
+        Write-BoxItem '[4] Vua BACKUP vua xoa Cache Browsers (An toan)' 'Green'
+        Write-BoxItem '[5] Phan tich Folder chiem dung luong lon'
+        Write-BoxSep 'Sua loi He dieu hanh'
+        Write-BoxItem '[6] Sua loi System Files (DISM & SFC Scannow)' 'Yellow'
+        Write-BoxItem '[7] Kiem tra o dia (CHKDSK)' 'Yellow'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
+        Write-BoxSep
+
+        switch (Read-Choice) {
+            '1' { Clean-Quick; Pause-Back }
+            '2' { Clean-Deep; Pause-Back }
             '3' { Clean-BrowserApp; Pause-Back }
-            '4' { Clean-Repair;     Pause-Back }
-            '5' { Show-DiskUsage;   Pause-Back }
+            '4' { Clean-BrowserAppWithBackup; Pause-Back }
+            '5' { Show-DiskUsage; Pause-Back }
+            '6' { Clean-Repair; Pause-Back }
+            '7' { Disk-Chkdsk; Pause-Back }
             '0' { return }
         }
     }
 }
 
-# ============================================================
-#  3. OFFICE CHECK  (kiem tra + go key trong 1 buoc)
-# ============================================================
+# ------------------------------------------------------------
+# 3. IT TOOLS & DIAGNOSTICS
+# ------------------------------------------------------------
 function Office-Check {
-    Write-Title 'Office check'
+    Draw-Header 'KIEM TRA & GO KEY OFFICE'
 
     $roots = @("$env:ProgramFiles\Microsoft Office", "${env:ProgramFiles(x86)}\Microsoft Office") | Where-Object { $_ -and (Test-Path $_) }
     $files = @()
@@ -517,9 +764,9 @@ function Office-Check {
 
     $found = @()
     foreach ($f in $files) {
-        Write-Host ("== {0}" -f $f) -ForegroundColor Cyan
+        Write-Host ("  == {0}" -f $f) -ForegroundColor Cyan
         $lines = @(& cscript.exe //nologo $f /dstatus 2>&1 | ForEach-Object { "$_" })
-        $lines | ForEach-Object { Write-Host $_ }
+        $lines | ForEach-Object { Write-Host "  $_" }
 
         $name = ''; $status = ''
         foreach ($l in $lines) {
@@ -533,19 +780,19 @@ function Office-Check {
 
     Write-Host ''
     if ($found.Count -gt 0) {
-        Write-Host 'Key dang cai:' -ForegroundColor Cyan
+        Write-Host '  Key dang cai:' -ForegroundColor Cyan
         for ($i = 0; $i -lt $found.Count; $i++) {
-            Write-Host (" {0}. {1}   {2}   {3}" -f ($i + 1), $found[$i].Key, $found[$i].Status, $found[$i].Name)
+            Write-Host ("  {0}. {1}   {2}   {3}" -f ($i + 1), $found[$i].Key, $found[$i].Status, $found[$i].Name)
         }
     } else {
         Write-Warn 'Khong tu doc duoc danh sach key (co the do Office khac ngon ngu). Van co the nhap tay.'
     }
 
     Write-Host ''
-    $in = Read-Host 'Go key: nhap so thu tu / A = tat ca / 5 ky tu cuoi cua key (cach nhau bang dau cach). Enter = bo qua'
+    $in = Read-Host '  Go key: nhap so thu tu / A = tat ca / 5 ky tu cuoi cua key (cach nhau bang dau cach). Enter = bo qua'
     if ([string]::IsNullOrWhiteSpace($in)) { return }
 
-    $jobs = @()   # moi phan tu: @{Key; File}
+    $jobs = @()
     foreach ($t in ($in -split '[\s,;]+' | Where-Object { $_ })) {
         if ($t -match '^[aA]$') {
             foreach ($x in $found) { $jobs += @{ Key = $x.Key; File = $x.File } }
@@ -565,12 +812,120 @@ function Office-Check {
     if ($jobs.Count -eq 0) { return }
 
     Write-Host ''
-    Write-Host ('Se go key: ' + (($jobs | ForEach-Object { $_.Key }) -join ', ')) -ForegroundColor Yellow
+    Write-Host ('  Se go key: ' + (($jobs | ForEach-Object { $_.Key }) -join ', ')) -ForegroundColor Yellow
     if (-not (Confirm-YN 'Xac nhan go (khong hoan tac duoc)?')) { return }
 
     foreach ($j in $jobs) {
         Write-Step ("unpkey: {0}" -f $j.Key)
-        & cscript.exe //nologo $j.File "/unpkey:$($j.Key)" 2>&1 | ForEach-Object { Write-Host $_ }
+        & cscript.exe //nologo $j.File "/unpkey:$($j.Key)" 2>&1 | ForEach-Object { Write-Host "  $_" }
+    }
+}
+
+function Win-LicenseCheck {
+    Draw-Header 'KIEM TRA BAN QUYEN WINDOWS'
+    cscript //nologo $env:SystemRoot\System32\slmgr.vbs /dli
+    cscript //nologo $env:SystemRoot\System32\slmgr.vbs /xpr
+}
+
+function Sys-HardwareInfo {
+    Draw-Header 'THONG TIN PHAN CUNG HE THONG'
+    $cs   = Get-CimInstance Win32_ComputerSystem
+    $bios = Get-CimInstance Win32_BIOS
+    $cpu  = Get-CimInstance Win32_Processor | Select-Object -First 1
+    $ram  = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB, 2)
+
+    Write-Host "  * Ten may      : $($cs.DNSHostName)" -ForegroundColor Cyan
+    Write-Host "  * Model        : $($cs.Manufacturer) $($cs.Model)" -ForegroundColor Cyan
+    Write-Host "  * Serial Number: $($bios.SerialNumber)" -ForegroundColor Yellow
+    Write-Host "  * CPU          : $($cpu.Name)" -ForegroundColor Cyan
+    Write-Host "  * RAM          : $ram GB" -ForegroundColor Cyan
+}
+
+function Fix-PrintSpooler {
+    Draw-Header 'RESTART PRINT SPOOLER'
+    Write-Step 'Dang dung dich vu Spooler va xoa spool temp...'
+    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
+    Clear-Folder "$env:SystemRoot\System32\spool\PRINTERS"
+    Start-Service -Name Spooler
+    Write-Ok 'Da khoi dong lai Print Spooler thanh cong!'
+}
+
+function Toggle-RDP {
+    Draw-Header 'QUAN LY REMOTE DESKTOP (RDP)'
+    $rdpKey = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+    $rdp = (Get-ItemProperty -Path $rdpKey).fDenyTSConnections
+    if ($rdp -eq 1) {
+        Write-Host '  Trang thai RDP hien tai: ' -NoNewline; Write-Host 'DANG TAT' -ForegroundColor Red
+        if (Confirm-YN 'Ban co muon BAT Remote Desktop?') {
+            Set-ItemProperty -Path $rdpKey -Name 'fDenyTSConnections' -Value 0
+            Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+            Write-Ok 'Da BAT Remote Desktop thanh cong!'
+        }
+    } else {
+        Write-Host '  Trang thai RDP hien tai: ' -NoNewline; Write-Host 'DANG BAT' -ForegroundColor Green
+        if (Confirm-YN 'Ban co muon TAT Remote Desktop?') {
+            Set-ItemProperty -Path $rdpKey -Name 'fDenyTSConnections' -Value 1
+            Write-Ok 'Da TAT Remote Desktop!'
+        }
+    }
+}
+
+function Menu-ITTools {
+    while ($true) {
+        Draw-Header 'CONG CU IT & HE THONG'
+        Write-BoxSep 'Ban quyen & Thong tin'
+        Write-BoxItem '[1] Kiem tra & Go Key Office (OSPP.vbs)'
+        Write-BoxItem '[2] Kiem tra Ban quyen Windows (SLMGR)'
+        Write-BoxItem '[3] Xem Thong tin Phan cung & BIOS'
+        Write-BoxSep 'Dich vu & Khoi dong'
+        Write-BoxItem '[4] Restart Print Spooler (Sua loi may in)' 'Green'
+        Write-BoxItem '[5] Bat / Tat Remote Desktop (RDP)' 'Green'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
+        Write-BoxSep
+
+        switch (Read-Choice) {
+            '1' { Office-Check; Pause-Back }
+            '2' { Win-LicenseCheck; Pause-Back }
+            '3' { Sys-HardwareInfo; Pause-Back }
+            '4' { Fix-PrintSpooler; Pause-Back }
+            '5' { Toggle-RDP; Pause-Back }
+            '0' { return }
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# 4. SYSINTERNALS LIVE
+# ------------------------------------------------------------
+function Menu-Sysinternals {
+    $basePath = '\\live.sysinternals.com\tools'
+    while ($true) {
+        Draw-Header 'SYSINTERNALS TOOLS (LIVE)'
+        Write-BoxSep 'Chay tu live.sysinternals.com'
+        Write-BoxItem '[1] Process Explorer - Task Manager nang cao'
+        Write-BoxItem '[2] Process Monitor  - Theo doi File/Registry'
+        Write-BoxItem '[3] Autoruns         - Quan ly Startup'
+        Write-BoxItem '[4] TCPView          - Xem port nang cao'
+        Write-BoxItem '[5] BgInfo           - Thong tin Desktop'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
+        Write-BoxSep
+
+        $exe = $null
+        switch (Read-Choice) {
+            '1' { $exe = 'procexp.exe' }
+            '2' { $exe = 'procmon.exe' }
+            '3' { $exe = 'autoruns.exe' }
+            '4' { $exe = 'tcpview.exe' }
+            '5' { $exe = 'bginfo.exe' }
+            '0' { return }
+        }
+        if ($exe) {
+            Write-Step "Dang mo $exe ..."
+            try { Start-Process "$basePath\$exe" -ErrorAction Stop }
+            catch { Write-Err ("Khong mo duoc {0}: {1}" -f $exe, $_.Exception.Message); Write-Host '  Kiem tra dich vu WebClient da chay chua.' -ForegroundColor DarkGray; Pause-Back }
+        }
     }
 }
 
@@ -579,16 +934,22 @@ function Office-Check {
 # ============================================================
 $quit = $false
 while (-not $quit) {
-    Write-Title 'TOOLS WIN CMD'
-    Write-Host ' 1. Network Fix'
-    Write-Host ' 2. Cleanup'
-    Write-Host ' 3. Office check'
-    Write-Host ' 0. Thoat'
-    Write-Host ''
-    switch (Read-Host 'Chon') {
+    Draw-Header 'IT SUPPORT TOOLKIT'
+    Write-BoxSep 'Danh muc'
+    Write-BoxItem '[1] NETWORK FIX       - Sua loi mang, IP, VPN, Nmap'
+    Write-BoxItem '[2] SYSTEM CLEANUP    - Don dep Temp, Cache, WinSxS'
+    Write-BoxItem '[3] IT & SYSTEM TOOLS - License Office, Spooler, RDP'
+    Write-BoxItem '[4] SYSINTERNALS LIVE - Process Explorer, Autoruns'
+    Write-BoxSep
+    Write-BoxItem '[0] THOAT' 'Red'
+    Write-BoxSep
+
+    switch (Read-Choice 'Chon danh muc (0-4)') {
         '1' { Menu-Network }
         '2' { Menu-Cleanup }
-        '3' { Office-Check; Pause-Back }
+        '3' { Menu-ITTools }
+        '4' { Menu-Sysinternals }
         '0' { $quit = $true }
+        default { Write-Warn 'Lua chon khong hop le!'; Start-Sleep -Seconds 1 }
     }
 }
