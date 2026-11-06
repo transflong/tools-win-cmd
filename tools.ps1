@@ -185,6 +185,14 @@ function Net-RefreshNic {
     $sel = @(Select-PhysicalNic)
     if ($sel.Count -eq 0) { return }
     $names = @($sel | ForEach-Object { $_.Name })
+    if ($env:SESSIONNAME -like 'RDP*') {
+        $rdpIf = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1
+        if ($rdpIf -and ($sel | Where-Object { $_.ifIndex -eq $rdpIf.InterfaceIndex })) {
+            Write-Err 'Da chan reset adapter dang mang Default Gateway trong phien RDP de tranh mat ket noi.'
+            return
+        }
+    }
 
     Write-Host ("  Se tat NIC, cho {0} giay roi bat lai." -f $WaitSeconds) -ForegroundColor Yellow
     if (-not (Confirm-YN 'Tiep tuc?')) { return }
@@ -485,6 +493,302 @@ function Net-PortCheck {
         Format-Table -AutoSize
 }
 
+# ---------------- NETWORK DIAGNOSTICS & UTILITIES ----------------
+function Net-DnsTools {
+    while ($true) {
+        Draw-Header 'DNS CHECK & BENCHMARK'
+        Write-BoxSep 'DNS tools'
+        Write-BoxItem '[1] Xem DNS hien tai (IPv4 / IPv6 / DoH)'
+        Write-BoxItem '[2] Benchmark DNS (do thoi gian truy van)'
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        $c = Read-Choice 'Chon'
+        if ($c -eq '0') { return }
+        if ($c -eq '1') {
+            Write-Host ''
+            Get-DnsClientServerAddress -ErrorAction SilentlyContinue |
+                Where-Object { $_.ServerAddresses.Count -gt 0 } |
+                Format-Table InterfaceAlias, AddressFamily, @{N='DNS Servers';E={$_.ServerAddresses -join ', '}} -AutoSize
+            Write-Host ''
+            Write-Step 'Trang thai DNS-over-HTTPS (Windows/netsh)'
+            & netsh.exe dnsclient show global
+            Write-Warn 'DNS leak test cong khai can dich vu ben ngoai; muc nay chi hien thi cau hinh DNS tren may.'
+            Pause-Back
+        }
+        elseif ($c -eq '2') {
+            $servers = @(
+                [pscustomobject]@{Name='Cloudflare'; IP='1.1.1.1'},
+                [pscustomobject]@{Name='Google'; IP='8.8.8.8'},
+                [pscustomobject]@{Name='NextDNS'; IP='45.90.28.0'},
+                [pscustomobject]@{Name='AdGuard'; IP='94.140.14.14'},
+                [pscustomobject]@{Name='Quad9'; IP='9.9.9.9'},
+                [pscustomobject]@{Name='OpenDNS'; IP='208.67.222.222'}
+            )
+            $domain = Read-Host '  Domain test (Enter = www.microsoft.com)'
+            if ([string]::IsNullOrWhiteSpace($domain)) { $domain = 'www.microsoft.com' }
+            Write-Host ''
+            Write-Host ('  Dang test {0} lan/server, domain: {1}' -f 3, $domain) -ForegroundColor Cyan
+            $results = @()
+            foreach ($server in $servers) {
+                $times = @()
+                for ($i=0; $i -lt 3; $i++) {
+                    $sw = [Diagnostics.Stopwatch]::StartNew()
+                    try {
+                        Resolve-DnsName -Name $domain -Server $server.IP -Type A -DnsOnly -ErrorAction Stop | Out-Null
+                        $sw.Stop(); $times += [math]::Round($sw.Elapsed.TotalMilliseconds, 1)
+                    } catch { $sw.Stop() }
+                }
+                if ($times.Count -gt 0) {
+                    $avg = [math]::Round(($times | Measure-Object -Average).Average, 1)
+                    $results += [pscustomobject]@{Provider=$server.Name; DNS=$server.IP; AvgMs=$avg; Success=('{0}/3' -f $times.Count)}
+                } else {
+                    $results += [pscustomobject]@{Provider=$server.Name; DNS=$server.IP; AvgMs='Failed'; Success='0/3'}
+                }
+            }
+            $results | Sort-Object @{Expression={if ($_.AvgMs -is [double] -or $_.AvgMs -is [int]) {[double]$_.AvgMs} else {[double]::MaxValue}}} | Format-Table -AutoSize
+            Write-Warn 'Ket qua phu thuoc mang hien tai, cache, vi tri DNS va thoi diem test; nen chay lai vai lan de so sanh.'
+            Pause-Back
+        }
+        else { Write-Warn 'Lua chon khong hop le.'; Start-Sleep -Seconds 1 }
+    }
+}
+
+function Net-IpConfiguration {
+    Draw-Header 'IP CONFIGURATION'
+    Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Select-Object InterfaceAlias, InterfaceIndex,
+            @{N='IPv4';E={($_.IPv4Address | ForEach-Object {$_.IPAddress}) -join ', '}},
+            @{N='Gateway';E={($_.IPv4DefaultGateway | ForEach-Object {$_.NextHop}) -join ', '}},
+            @{N='DNS';E={($_.DNSServer | ForEach-Object {$_.ServerAddresses}) -join ', '}} |
+        Format-List
+    Write-Host ''
+    Write-BoxSep 'DHCP Renew'
+    Write-Warn 'Renew co the lam mat ket noi tam thoi. Neu dang remote/RDP, khong nen chay.'
+    if ($env:SESSIONNAME -like 'RDP*') { Write-Err 'Phat hien phien RDP. Da chan thao tac Renew de tranh tu ngat ket noi.'; return }
+    if (Confirm-YN 'Chay ipconfig /renew cho cac adapter DHCP?') {
+        ipconfig.exe /renew
+        Start-Sleep -Seconds 2
+        Write-Ok 'Da gui lenh renew. Kiem tra lai IP o tren.'
+    }
+}
+
+function Net-AdapterManagement {
+    while ($true) {
+        Draw-Header 'NETWORK ADAPTER MANAGEMENT'
+        $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
+        if ($nics.Count -eq 0) { Write-Err 'Khong tim thay adapter vat ly.'; return }
+        $nics | Format-Table Name, Status, LinkSpeed, InterfaceDescription -AutoSize
+        Write-BoxSep 'Thao tac'
+        Write-BoxItem '[1] Xem driver / chi tiet adapter'
+        Write-BoxItem '[2] Restart adapter'
+        Write-BoxItem '[3] Enable adapter'
+        Write-BoxItem '[4] Disable adapter'
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        $c = Read-Choice 'Chon'
+        if ($c -eq '0') { return }
+        if ($c -notmatch '^[1-4]$') { Write-Warn 'Lua chon khong hop le.'; Pause-Back; continue }
+        $idx = Read-Host '  Nhap ten adapter (Enter = chon trong danh sach)'
+        if ([string]::IsNullOrWhiteSpace($idx)) {
+            for ($i=0; $i -lt $nics.Count; $i++) { Write-Host ('  {0}. {1} [{2}]' -f ($i+1),$nics[$i].Name,$nics[$i].Status) }
+            $pick = Read-Host '  Chon so (0 = huy)'
+            if ($pick -notmatch '^\d+$' -or [int]$pick -lt 1 -or [int]$pick -gt $nics.Count) { continue }
+            $nic = $nics[[int]$pick-1]
+        } else {
+            $nic = $nics | Where-Object {$_.Name -eq $idx} | Select-Object -First 1
+            if (-not $nic) { Write-Err 'Khong tim thay ten adapter.'; Pause-Back; continue }
+        }
+        if ($c -eq '1') {
+            $nic | Format-List *
+            Get-CimInstance Win32_NetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.NetConnectionID -eq $nic.Name } |
+                Select-Object NetConnectionID, Name, DriverVersion, DriverDate, PNPDeviceID | Format-List
+        } else {
+            if ($env:SESSIONNAME -like 'RDP*' -and $nic.Status -eq 'Up') {
+                $rdpIf = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1
+                if ($rdpIf -and $nic.ifIndex -eq $rdpIf.InterfaceIndex) {
+                    Write-Err 'Chan thao tac tren adapter dang mang Default Gateway trong phien RDP.'; Pause-Back; continue
+                }
+            }
+            if (-not (Confirm-YN ("Xac nhan thao tac tren {0}?" -f $nic.Name))) { continue }
+            try {
+                switch ($c) {
+                    '2' { Restart-NetAdapter -Name $nic.Name -Confirm:$false -ErrorAction Stop }
+                    '3' { Enable-NetAdapter -Name $nic.Name -Confirm:$false -ErrorAction Stop }
+                    '4' { Disable-NetAdapter -Name $nic.Name -Confirm:$false -ErrorAction Stop }
+                }
+                Write-Ok 'Da gui lenh. Trang thai moi:'
+                Start-Sleep -Seconds 2
+                Get-NetAdapter -Name $nic.Name | Format-Table Name, Status, LinkSpeed -AutoSize
+            } catch { Write-Err $_.Exception.Message }
+        }
+        Pause-Back
+    }
+}
+
+function Net-VpnDiagnostics {
+    Draw-Header 'VPN TROUBLESHOOTING - READ ONLY'
+    Write-Host '  Adapter co tu khoa VPN/Tunnel:' -ForegroundColor Cyan
+    $vpn = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {
+        ($_.Name + ' ' + $_.InterfaceDescription) -match '(?i)vpn|tunnel|wireguard|tap|wintun|openvpn|forti|cisco|anyconnect|globalprotect|pulse|checkpoint|l2tp|sstp'
+    })
+    if ($vpn.Count) { $vpn | Format-Table Name, Status, InterfaceDescription, ifIndex -AutoSize }
+    else { Write-Warn 'Khong nhan dien duoc adapter VPN theo ten; VPN co the dung ten khac.' }
+
+    Write-Host ''
+    Write-Step 'Default route IPv4'
+    Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        Sort-Object RouteMetric | Format-Table InterfaceAlias, ifIndex, NextHop, RouteMetric, State -AutoSize
+    Write-Step 'Route LAN / private network (10/8, 172.16/12, 192.168/16)'
+    Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {$_.DestinationPrefix -match '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)'} |
+        Sort-Object DestinationPrefix | Format-Table DestinationPrefix, InterfaceAlias, NextHop, RouteMetric -AutoSize
+    Write-Step 'DNS tren cac interface dang hoat dong'
+    Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {$_.ServerAddresses.Count -gt 0} |
+        Format-Table InterfaceAlias, @{N='DNS';E={$_.ServerAddresses -join ', '}} -AutoSize
+    Write-Host ''
+    $hostOrIp = Read-Host '  Nhap IP/hostname VPN Server de test (Enter = bo qua)'
+    if (-not [string]::IsNullOrWhiteSpace($hostOrIp)) {
+        $resolved = Resolve-Ipv4 $hostOrIp
+        if ($resolved) { Write-Ok "Resolve: $hostOrIp -> $resolved"; Test-NetConnection -ComputerName $resolved -InformationLevel Detailed }
+        else { Write-Err "Khong resolve duoc $hostOrIp" }
+    }
+    Write-Warn 'Module nay chi thu thap thong tin, khong tu sua route hay thay default gateway.'
+}
+
+function Net-WifiInfo {
+    Draw-Header 'WI-FI INFORMATION'
+    Write-Step 'Wi-Fi interface'
+    & netsh.exe wlan show interfaces
+    Write-Step 'Wi-Fi driver'
+    & netsh.exe wlan show drivers
+    Write-Step 'Saved Wi-Fi profiles (chi ten profile)'
+    & netsh.exe wlan show profiles
+    Write-Warn 'Khong hien thi mat khau Wi-Fi da luu.'
+}
+
+function Net-ProxyProfile {
+    while ($true) {
+        Draw-Header 'PROXY & NETWORK PROFILE'
+        Write-BoxSep 'Proxy'
+        $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        $settings = Get-ItemProperty -Path $reg -ErrorAction SilentlyContinue
+        Write-Host ('  User Proxy : {0}' -f $(if ($settings.ProxyEnable -eq 1) {'ON'} else {'OFF'}))
+        if ($settings.ProxyServer) { Write-Host ('  Proxy      : {0}' -f $settings.ProxyServer) }
+        if ($settings.AutoConfigURL) { Write-Host ('  PAC URL    : {0}' -f $settings.AutoConfigURL) }
+        & netsh.exe winhttp show proxy
+        Write-BoxSep 'Network profile'
+        Get-NetConnectionProfile -ErrorAction SilentlyContinue | Format-Table Name, InterfaceAlias, NetworkCategory, IPv4Connectivity -AutoSize
+        Write-BoxItem '[1] Toggle User Proxy (HKCU)'
+        Write-BoxItem '[2] Reset WinHTTP Proxy (may affect services/apps)'
+        Write-BoxItem '[3] Set Network Profile Public / Private'
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        $c = Read-Choice 'Chon'
+        if ($c -eq '0') { return }
+        if ($c -eq '1') {
+            $enable = ($settings.ProxyEnable -ne 1)
+            if (Confirm-YN ("{0} User Proxy?" -f $(if ($enable) {'Bat'} else {'Tat'}))) {
+                Set-ItemProperty -Path $reg -Name ProxyEnable -Value ([int]$enable)
+                Write-Ok 'Da cap nhat User Proxy. Mot so ung dung can mo lai de nhan cau hinh.'
+            }
+        } elseif ($c -eq '2') {
+            if (Confirm-YN 'Reset WinHTTP Proxy ve DIRECT?') { & netsh.exe winhttp reset proxy; Write-Ok 'Da reset WinHTTP proxy.' }
+        } elseif ($c -eq '3') {
+            $profiles = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue)
+            for ($i=0; $i -lt $profiles.Count; $i++) { Write-Host ('  {0}. {1} [{2}]' -f ($i+1),$profiles[$i].InterfaceAlias,$profiles[$i].NetworkCategory) }
+            $pick = Read-Host '  Chon profile'
+            if ($pick -match '^\d+$' -and [int]$pick -ge 1 -and [int]$pick -le $profiles.Count) {
+                $p = $profiles[[int]$pick-1]
+                Write-Host '  [1] Private (tin cay / chia se LAN)  [2] Public (an toan hon)' 
+                $kind = Read-Host '  Chon 1/2'
+                if ($kind -in @('1','2') -and (Confirm-YN 'Xac nhan thay doi Network Profile?')) {
+                    try { Set-NetConnectionProfile -InterfaceIndex $p.InterfaceIndex -NetworkCategory $(if ($kind -eq '1') {'Private'} else {'Public'}) -ErrorAction Stop; Write-Ok 'Da cap nhat Network Profile.' }
+                    catch { Write-Err $_.Exception.Message }
+                }
+            }
+        } else { Write-Warn 'Lua chon khong hop le.' }
+        Pause-Back
+    }
+}
+
+function Net-ExportReport {
+    Draw-Header 'EXPORT NETWORK REPORT'
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if (-not $desktop -or -not (Test-Path $desktop)) { $desktop = $env:TEMP }
+    $path = Join-Path $desktop ("Network_Report_{0}_{1}.txt" -f $env:COMPUTERNAME,(Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $sections = @()
+    $sections += '=== NETWORK REPORT ==='
+    $sections += ('Computer: {0} | User: {1} | Date: {2}' -f $env:COMPUTERNAME,$env:USERNAME,(Get-Date))
+    $sections += "`r`n=== ADAPTERS ==="
+    $sections += (Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Format-List Name, InterfaceDescription, Status, LinkSpeed, MacAddress, ifIndex | Out-String)
+    $sections += "`r`n=== IP CONFIGURATION ==="
+    $sections += (Get-NetIPConfiguration -ErrorAction SilentlyContinue | Format-List * | Out-String)
+    $sections += "`r`n=== DNS ==="
+    $sections += (Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Format-List * | Out-String)
+    $sections += "`r`n=== DEFAULT ROUTES ==="
+    $sections += (Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String)
+    $sections += "`r`n=== PROXY ==="
+    $sections += (& netsh.exe winhttp show proxy 2>&1 | Out-String)
+    $sections += "`r`n=== WIFI ==="
+    $sections += (& netsh.exe wlan show interfaces 2>&1 | Out-String)
+    $sections += "`r`n=== TCP CONNECTIONS ==="
+    $sections += (Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Select-Object -First 100 | Format-Table -AutoSize | Out-String)
+    try {
+        $sections | Set-Content -LiteralPath $path -Encoding UTF8
+        Write-Ok "Da xuat bao cao: $path"
+        if (Confirm-YN 'Mo file report?') { Start-Process notepad.exe -ArgumentList "`"$path`"" }
+    } catch { Write-Err $_.Exception.Message }
+}
+
+function Net-ConnectivityDiagnostics {
+    Draw-Header 'NETWORK DIAGNOSTICS'
+    $cfg = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object {$_.IPv4DefaultGateway -and $_.IPv4Address} | Select-Object -First 1
+    if (-not $cfg) { Write-Err 'Khong tim thay interface IPv4 co Default Gateway.'; return }
+    $ip = ($cfg.IPv4Address | Select-Object -First 1).IPAddress
+    $gw = ($cfg.IPv4DefaultGateway | Select-Object -First 1).NextHop
+    Write-Host ('  Interface: {0} | IP: {1} | Gateway: {2}' -f $cfg.InterfaceAlias,$ip,$gw) -ForegroundColor Cyan
+
+    Write-Step '1. NIC status'
+    Get-NetAdapter -InterfaceIndex $cfg.InterfaceIndex -ErrorAction SilentlyContinue | Format-Table Name, Status, LinkSpeed -AutoSize
+    Write-Step "2. Gateway: $gw"
+    $gwOk = Test-Connection -ComputerName $gw -Count 2 -Quiet -ErrorAction SilentlyContinue
+    if ($gwOk) { Write-Ok 'Gateway ping OK' } else { Write-Warn 'Gateway khong phan hoi ping (co the firewall chan ICMP).' }
+
+    Write-Step '3. Internet TCP 443: 1.1.1.1'
+    $internet = Test-NetConnection -ComputerName '1.1.1.1' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
+    if ($internet) { Write-Ok 'Ket noi TCP 443 toi Internet OK' } else { Write-Err 'Khong ket noi duoc TCP 443 toi 1.1.1.1' }
+
+    Write-Step '4. Packet loss (ping 1.1.1.1 x 5)'
+    $pingResults = @(Test-Connection -ComputerName '1.1.1.1' -Count 5 -ErrorAction SilentlyContinue)
+    $lost = 5 - $pingResults.Count
+    $lossPct = [math]::Round(($lost / 5) * 100, 0)
+    Write-Host ("  Reply: {0}/5 | Packet loss: {1}%" -f $pingResults.Count,$lossPct)
+    if ($lossPct -eq 0) { Write-Ok 'Khong ghi nhan packet loss qua ICMP.' }
+    elseif ($lossPct -lt 100) { Write-Warn 'Co packet loss ICMP; can test lai de xac nhan.' }
+    else { Write-Warn 'Khong co ICMP reply; dich vu/mang co the chan ping.' }
+
+    Write-Step '5. DNS resolve: www.microsoft.com'
+    try { Resolve-DnsName -Name 'www.microsoft.com' -Type A -DnsOnly -ErrorAction Stop | Select-Object -First 3 Name, IPAddress | Format-Table -AutoSize; Write-Ok 'DNS resolve OK' }
+    catch { Write-Err ('DNS resolve loi: {0}' -f $_.Exception.Message) }
+
+    Write-Step '6. HTTPS test'
+    try {
+        $resp = Invoke-WebRequest -Uri 'https://www.msftconnecttest.com/connecttest.txt' -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop
+        Write-Ok ("HTTPS OK - HTTP {0}" -f [int]$resp.StatusCode)
+    } catch { Write-Warn ('HTTPS test that bai/bi proxy chan: {0}' -f $_.Exception.Message) }
+
+    Write-Host ''
+    Write-Host '  Goi y doc ket qua:' -ForegroundColor Cyan
+    Write-Host '  - Gateway fail: kiem tra cap/Wi-Fi, VLAN, NIC, IP.'
+    Write-Host '  - Gateway OK, TCP fail: kiem tra router, firewall, VPN, default route.'
+    Write-Host '  - TCP OK, DNS fail: kiem tra DNS server / DNS policy.'
+    Write-Host '  - TCP + DNS OK, HTTPS fail: kiem tra proxy, TLS, captive portal.'
+}
+
 # ---------------- NMAP ----------------
 function Get-NmapPath {
     $c = Get-Command nmap.exe -ErrorAction SilentlyContinue
@@ -585,16 +889,24 @@ function Net-Nmap {
 function Menu-Network {
     while ($true) {
         Draw-Header 'NETWORK FIX & DIAGNOSTICS'
-        Write-BoxSep 'Chuc nang chinh'
+        Write-BoxSep 'Fix & configuration'
         Write-BoxItem '[1] Reset IP & Flush DNS (Go nghen mang)'
         Write-BoxItem '[2] Reset Network Card (Disable/Enable)'
         Write-BoxItem '[3] Reconnect Network Drive (quyen User)'
         Write-BoxItem '[4] Fix Route VPN (Dinh tuyen cho VPN)'
-        Write-BoxItem '[5] Quick Change DNS (Cloudflare/Google/NextDNS...)' 'Green'
-        Write-BoxSep 'Chuan doan IT'
-        Write-BoxItem '[6] Ping / Tracert kiem tra ket noi' 'Yellow'
-        Write-BoxItem '[7] Cong dang mo (Open Ports & Connections)' 'Yellow'
-        Write-BoxItem '[8] Nmap - Quet thiet bi / port trong mang' 'Cyan'
+        Write-BoxItem '[5] Quick DNS Switch (Cloudflare/Google/NextDNS...)' 'Green'
+        Write-BoxItem '[6] IP Configuration / DHCP Renew'
+        Write-BoxItem '[7] Adapter Management (Driver/Restart/Enable)'
+        Write-BoxSep 'Diagnostics & monitoring'
+        Write-BoxItem '[8] Network Diagnostics (NIC > Gateway > DNS > Internet)' 'Yellow'
+        Write-BoxItem '[9] DNS Check & Benchmark' 'Yellow'
+        Write-BoxItem '[10] VPN Troubleshooting (Route/Adapter/DNS)' 'Yellow'
+        Write-BoxItem '[11] Wi-Fi Information' 'Yellow'
+        Write-BoxItem '[12] Connectivity / Tracert / Open Ports' 'Yellow'
+        Write-BoxItem '[13] Nmap - Quet thiet bi / port trong mang' 'Cyan'
+        Write-BoxSep 'System settings & report'
+        Write-BoxItem '[14] Proxy / Network Profile'
+        Write-BoxItem '[15] Export Network Report (TXT)'
         Write-BoxSep
         Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
         Write-BoxSep
@@ -605,9 +917,16 @@ function Menu-Network {
             '3' { Net-ReconnectDrives; Pause-Back }
             '4' { Net-FixVpnRoute; Pause-Back }
             '5' { Net-ChangeDNS; Pause-Back }
-            '6' { Net-Diagnostics; Pause-Back }
-            '7' { Net-PortCheck; Pause-Back }
-            '8' { Net-Nmap; Pause-Back }
+            '6' { Net-IpConfiguration; Pause-Back }
+            '7' { Net-AdapterManagement }
+            '8' { Net-ConnectivityDiagnostics; Pause-Back }
+            '9' { Net-DnsTools }
+            '10' { Net-VpnDiagnostics; Pause-Back }
+            '11' { Net-WifiInfo; Pause-Back }
+            '12' { Net-Diagnostics; Net-PortCheck; Pause-Back }
+            '13' { Net-Nmap; Pause-Back }
+            '14' { Net-ProxyProfile }
+            '15' { Net-ExportReport; Pause-Back }
             '0' { return }
         }
     }
@@ -1137,6 +1456,536 @@ function Menu-ITTools {
     }
 }
 
+
+# ------------------------------------------------------------
+# 5. WINDOWS REPAIR & HEALTH
+# ------------------------------------------------------------
+function Win-RepairMenu {
+    while ($true) {
+        Draw-Header 'WINDOWS REPAIR & HEALTH'
+        Write-BoxSep 'Kiem tra / sua loi'
+        Write-BoxItem '[1] SFC ScanNow - quet va sua system files' 'Yellow'
+        Write-BoxItem '[2] DISM CheckHealth - kiem tra component store'
+        Write-BoxItem '[3] DISM ScanHealth - quet loi component store'
+        Write-BoxItem '[4] DISM RestoreHealth - sua component store' 'Yellow'
+        Write-BoxItem '[5] Windows Update - xem trang thai services'
+        Write-BoxItem '[6] Reset Windows Update cache' 'Yellow'
+        Write-BoxItem '[7] Xem loi Critical/Error trong 24 gio'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        switch (Read-Choice) {
+            '1' {
+                Draw-Header 'SYSTEM FILE CHECKER'
+                Write-Warn 'SFC co the mat vai phut va se tu sua file he thong neu co the.'
+                if (Confirm-YN 'Chay sfc /scannow?') { sfc.exe /scannow }
+                Pause-Back
+            }
+            '2' { Draw-Header 'DISM CHECKHEALTH'; dism.exe /Online /Cleanup-Image /CheckHealth; Pause-Back }
+            '3' { Draw-Header 'DISM SCANHEALTH'; dism.exe /Online /Cleanup-Image /ScanHealth; Pause-Back }
+            '4' {
+                Draw-Header 'DISM RESTOREHEALTH'
+                Write-Warn 'Can Internet hoac Windows source phu hop. Khong tat may trong luc chay.'
+                if (Confirm-YN 'Chay DISM RestoreHealth?') { dism.exe /Online /Cleanup-Image /RestoreHealth }
+                Pause-Back
+            }
+            '5' {
+                Draw-Header 'WINDOWS UPDATE SERVICES'
+                Get-Service wuauserv, bits, usosvc, cryptsvc -ErrorAction SilentlyContinue |
+                    Format-Table Name, DisplayName, Status, StartType -AutoSize
+                Pause-Back
+            }
+            '6' {
+                Draw-Header 'RESET WINDOWS UPDATE CACHE'
+                Write-Warn 'Tam dung Windows Update va xoa cache Download; khong xoa lich su cap nhat.'
+                if (Confirm-YN 'Tiep tuc reset cache?') {
+                    $svc = @('bits','wuauserv','cryptsvc')
+                    foreach ($n in $svc) { Stop-Service $n -Force -ErrorAction SilentlyContinue }
+                    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                    $download = Join-Path $env:SystemRoot 'SoftwareDistribution\Download'
+                    if (Test-Path $download) {
+                        $backup = "$download.ITToolkit_$stamp.bak"
+                        try { Rename-Item $download $backup -ErrorAction Stop; New-Item -ItemType Directory -Path $download -Force | Out-Null; Write-Ok "Cache cu duoc doi ten: $backup" }
+                        catch { Write-Warn "Khong doi ten duoc cache: $($_.Exception.Message)" }
+                    }
+                    foreach ($n in $svc) { Start-Service $n -ErrorAction SilentlyContinue }
+                    Write-Ok 'Da hoan tat thao tac reset cache (neu khong co loi phia tren).'
+                }
+                Pause-Back
+            }
+            '7' {
+                Draw-Header 'RECENT WINDOWS ERRORS'
+                $since = (Get-Date).AddHours(-24)
+                Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2; StartTime=$since} -MaxEvents 40 -ErrorAction SilentlyContinue |
+                    Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, @{N='Message';E={($_.Message -replace '\s+',' ').Substring(0,[math]::Min(180,($_.Message -replace '\s+',' ').Length))}} |
+                    Format-Table -Wrap -AutoSize
+                Pause-Back
+            }
+            '0' { return }
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# 6. SYSTEM MONITORING
+# ------------------------------------------------------------
+function Sys-MonitorSnapshot {
+    Draw-Header 'SYSTEM MONITORING SNAPSHOT'
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Measure-Object LoadPercentage -Average
+    $totalMem = [double]$os.TotalVisibleMemorySize * 1KB
+    $freeMem  = [double]$os.FreePhysicalMemory * 1KB
+    $usedPct = if ($totalMem -gt 0) { [math]::Round((($totalMem-$freeMem)/$totalMem)*100,1) } else { 0 }
+    Write-Host ('  CPU Load       : {0}%' -f [math]::Round($cpu.Average,1)) -ForegroundColor Cyan
+    Write-Host ('  RAM Usage      : {0}% ({1:N2}/{2:N2} GB)' -f $usedPct,(($totalMem-$freeMem)/1GB),($totalMem/1GB)) -ForegroundColor Cyan
+    Write-Host ('  Uptime         : {0}' -f ((Get-Date)-$os.LastBootUpTime))
+    Write-Host "`n  TOP PROCESS - CPU time" -ForegroundColor Yellow
+    Get-Process -ErrorAction SilentlyContinue | Sort-Object CPU -Descending | Select-Object -First 10 Name, Id, CPU, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table -AutoSize
+    Write-Host '  DISK SPACE' -ForegroundColor Yellow
+    Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue |
+        Select-Object DeviceID, VolumeName, @{N='Size_GB';E={[math]::Round($_.Size/1GB,1)}}, @{N='Free_GB';E={[math]::Round($_.FreeSpace/1GB,1)}}, @{N='Free_Pct';E={if($_.Size){[math]::Round($_.FreeSpace/$_.Size*100,1)}else{0}}} |
+        Format-Table -AutoSize
+    Write-Host '  PHYSICAL DISK HEALTH (neu driver ho tro)' -ForegroundColor Yellow
+    try { Get-PhysicalDisk -ErrorAction Stop | Select-Object FriendlyName, MediaType, HealthStatus, OperationalStatus, @{N='Size_GB';E={[math]::Round($_.Size/1GB,1)}} | Format-Table -AutoSize }
+    catch { Write-Host '  Khong doc duoc Get-PhysicalDisk tren may nay.' -ForegroundColor DarkGray }
+    Write-Host '  TOP PROCESS - RAM' -ForegroundColor Yellow
+    Get-Process -ErrorAction SilentlyContinue | Sort-Object WorkingSet64 -Descending | Select-Object -First 10 Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table -AutoSize
+}
+
+function Sys-ExportReport {
+    $dir = Join-Path $env:USERPROFILE 'Desktop'
+    $file = Join-Path $dir ("IT_SystemReport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('IT SYSTEM REPORT - ' + (Get-Date))
+    $lines.Add('Computer: ' + $env:COMPUTERNAME)
+    $lines.Add('User: ' + $env:USERNAME)
+    $lines.Add('')
+    $lines.Add('=== OS ===')
+    $lines.Add((Get-CimInstance Win32_OperatingSystem | Format-List Caption,Version,BuildNumber,OSArchitecture,LastBootUpTime | Out-String))
+    $lines.Add('=== CPU ===')
+    $lines.Add((Get-CimInstance Win32_Processor | Format-List Name,NumberOfCores,NumberOfLogicalProcessors,LoadPercentage | Out-String))
+    $lines.Add('=== MEMORY ===')
+    $lines.Add((Get-CimInstance Win32_OperatingSystem | Select-Object @{N='TotalGB';E={[math]::Round($_.TotalVisibleMemorySize/1MB,2)}},@{N='FreeGB';E={[math]::Round($_.FreePhysicalMemory/1MB,2)}} | Format-List | Out-String))
+    $lines.Add('=== DISKS ===')
+    $lines.Add((Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID,VolumeName,Size,FreeSpace | Format-Table -AutoSize | Out-String))
+    $lines.Add('=== TOP PROCESSES ===')
+    $lines.Add((Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 20 Name,Id,CPU,@{N='RAM_MB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table -AutoSize | Out-String))
+    $lines.Add('=== PHYSICAL DISKS ===')
+    try { $lines.Add((Get-PhysicalDisk | Format-Table FriendlyName,MediaType,HealthStatus,OperationalStatus,Size -AutoSize | Out-String)) } catch { $lines.Add('Get-PhysicalDisk unavailable') }
+    $lines | Set-Content -Path $file -Encoding UTF8
+    Write-Ok "Da xuat report: $file"
+}
+
+function Menu-SystemMonitor {
+    while ($true) {
+        Draw-Header 'SYSTEM MONITORING'
+        Write-BoxSep 'Theo doi tai nguyen'
+        Write-BoxItem '[1] Snapshot CPU / RAM / Disk / Process' 'Green'
+        Write-BoxItem '[2] Top process su dung RAM'
+        Write-BoxItem '[3] Top process CPU time'
+        Write-BoxItem '[4] Startup Programs (Current User + Machine)'
+        Write-BoxItem '[5] Export System Report TXT'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        switch (Read-Choice) {
+            '1' { Sys-MonitorSnapshot; Pause-Back }
+            '2' { Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 25 Name,Id,@{N='RAM_MB';E={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table -AutoSize; Pause-Back }
+            '3' { Get-Process | Sort-Object CPU -Descending | Select-Object -First 25 Name,Id,CPU | Format-Table -AutoSize; Pause-Back }
+            '4' {
+                Draw-Header 'STARTUP PROGRAMS'
+                $paths = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run')
+                foreach ($path in $paths) { if (Test-Path $path) { Write-Host "`n  $path" -ForegroundColor Yellow; Get-ItemProperty $path | Format-List * } }
+                Pause-Back
+            }
+            '5' { Sys-ExportReport; Pause-Back }
+            '0' { return }
+        }
+    }
+}
+
+# ---------------- ONEDRIVE RESYNC ----------------
+function Get-OneDriveExe {
+    @("$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe",
+      "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe",
+      "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe") |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
+function Get-OneDriveAccounts {
+    $base = 'HKCU:\Software\Microsoft\OneDrive\Accounts'
+    $list = @()
+    if (Test-Path $base) {
+        foreach ($k in (Get-ChildItem $base -ErrorAction SilentlyContinue)) {
+            $p = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
+            if ($p -and $p.UserFolder -and (Test-Path -LiteralPath $p.UserFolder)) {
+                $list += [pscustomobject]@{ Key = $k.PSChildName; Email = [string]$p.UserEmail; Folder = ([string]$p.UserFolder).TrimEnd('\') }
+            }
+        }
+    }
+    return $list
+}
+
+# Quet tat ca folder OneDrive tren may (registry + bien moi truong + folder trong profile)
+function Get-OneDriveFolders {
+    $seen = @{}
+    $list = @()
+    foreach ($a in @(Get-OneDriveAccounts)) {
+        $k = $a.Folder.ToLower()
+        if (-not $seen.ContainsKey($k)) {
+            $seen[$k] = $true
+            $list += [pscustomobject]@{ Label = $a.Email; Folder = $a.Folder; Source = 'Tai khoan' }
+        }
+    }
+    $cands = @()
+    foreach ($v in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer)) { if ($v) { $cands += $v.TrimEnd('\') } }
+    Get-ChildItem -LiteralPath $env:USERPROFILE -Directory -Filter 'OneDrive*' -Force -ErrorAction SilentlyContinue | ForEach-Object { $cands += $_.FullName }
+    foreach ($c in $cands) {
+        if ($c -match '_old\d*$') { continue }
+        if (-not (Test-Path -LiteralPath $c)) { continue }
+        $k = $c.ToLower()
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $list += [pscustomobject]@{ Label = '(khong co trong registry)'; Folder = $c; Source = 'Quet folder' }
+    }
+    return $list
+}
+
+# Tat toan bo tien trinh thuoc ho OneDrive (khong chi OneDrive.exe)
+function Stop-OneDriveAll([string]$Exe) {
+    if ($Exe) { try { & $Exe /shutdown 2>$null } catch {}; Start-Sleep -Seconds 3 }
+    $names  = @('OneDrive','OneDriveStandaloneUpdater','FileCoAuth','FileSyncHelper','Microsoft.SharePoint')
+    $odDirs = @("$env:LOCALAPPDATA\Microsoft\OneDrive\", "$env:ProgramFiles\Microsoft OneDrive\", "${env:ProgramFiles(x86)}\Microsoft OneDrive\")
+    for ($i = 0; $i -lt 3; $i++) {
+        $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $pth = $null
+            try { $pth = $_.Path } catch {}
+            ($names -contains $_.Name) -or ($pth -and (@($odDirs | Where-Object { $pth.StartsWith($_, 'OrdinalIgnoreCase') }).Count -gt 0))
+        })
+        if ($procs.Count -eq 0) { return $true }
+        foreach ($pr in $procs) {
+            try { Stop-Process -Id $pr.Id -Force -ErrorAction Stop; Write-Host ("    Da tat: {0} (PID {1})" -f $pr.Name, $pr.Id) -ForegroundColor DarkGray }
+            catch { Write-Warn ("Khong tat duoc {0} (PID {1})" -f $pr.Name, $pr.Id) }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return (-not (Get-Process OneDrive -ErrorAction SilentlyContinue))
+}
+
+# Lay handle.exe (Sysinternals) - dung de tim process giu handle tren folder (giong Resource Monitor > Associated Handles)
+function Get-HandleExe {
+    $name = if ([Environment]::Is64BitOperatingSystem) { 'handle64.exe' } else { 'handle.exe' }
+    $dir  = Join-Path $env:ProgramData 'ITTools'
+    $exe  = Join-Path $dir $name
+    if ((Test-Path -LiteralPath $exe) -and ((Get-Item -LiteralPath $exe).Length -gt 100KB)) { return $exe }
+    try {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Write-Host "  Dang tai $name tu live.sysinternals.com ..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri "https://live.sysinternals.com/$name" -OutFile $exe -UseBasicParsing -ErrorAction Stop
+        if ((Get-Item -LiteralPath $exe).Length -gt 100KB) { return $exe }
+        Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+    } catch {}
+    return $null
+}
+
+# Liet ke process dang giu handle tren folder (chi tinh handle co duong dan = folder hoac nam trong folder)
+function Get-FolderHandleHolders([string]$Folder, [string]$HandleExe) {
+    $res = @()
+    $out = & $HandleExe -accepteula -nobanner $Folder 2>$null
+    foreach ($line in @($out)) {
+        if ($line -match '^(.+?)\s+pid:\s+(\d+)\s+type:\s+(\S+)\s+([0-9A-Fa-f]+):\s+(.+)$') {
+            $hn = $Matches[5].Trim()
+            if ($hn.Equals($Folder, 'OrdinalIgnoreCase') -or $hn.StartsWith($Folder + '\', 'OrdinalIgnoreCase')) {
+                $res += [pscustomobject]@{ Name = $Matches[1].Trim(); ProcId = [int]$Matches[2]; Path = $hn }
+            }
+        }
+    }
+    return $res
+}
+
+# Tat tat ca process dang giu handle tren folder (tru process he thong). Explorer -> khoi dong lai.
+function Stop-FolderHandleHolders([string]$Folder, [string]$HandleExe) {
+    $protected = @('System','Idle','Registry','smss','csrss','wininit','winlogon','services','lsass','dwm','fontdrvhost','svchost','MemCompression')
+    $explorerDone = $false
+    for ($round = 1; $round -le 3; $round++) {
+        $holders = @(Get-FolderHandleHolders $Folder $HandleExe | Where-Object { $_.ProcId -ne $PID })
+        if ($holders.Count -eq 0) { return $true }
+        $needExplorer = $false
+        foreach ($h in ($holders | Sort-Object ProcId -Unique)) {
+            $pn = $h.Name -replace '\.exe$', ''
+            if ($protected -contains $pn) { Write-Warn ("Process he thong dang giu handle, khong tat: {0} (PID {1})" -f $h.Name, $h.ProcId); continue }
+            if ($pn -ieq 'explorer') { $needExplorer = $true; continue }
+            try { Stop-Process -Id $h.ProcId -Force -ErrorAction Stop; Write-Host ("    Da tat: {0} (PID {1}) - giu {2}" -f $h.Name, $h.ProcId, $h.Path) -ForegroundColor DarkGray }
+            catch { Write-Warn ("Khong tat duoc {0} (PID {1})" -f $h.Name, $h.ProcId) }
+        }
+        if ($needExplorer -and -not $explorerDone) {
+            Write-Host '    Explorer dang mo folder -> khoi dong lai Explorer...' -ForegroundColor DarkGray
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process "$env:windir\explorer.exe" }
+            $explorerDone = $true
+        }
+        Start-Sleep -Seconds 2
+    }
+    return (@(Get-FolderHandleHolders $Folder $HandleExe | Where-Object { $_.ProcId -ne $PID }).Count -eq 0)
+}
+
+# Dem file local / cloud-only (placeholder) trong folder OneDrive
+function Get-FolderSyncStats([string]$Path) {
+    $files = 0; $cloud = 0; [int64]$bytes = 0
+    Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $files++
+        if ([int]$_.Attributes -band 0x440000) { $cloud++ } else { $bytes += $_.Length }
+    }
+    return [pscustomobject]@{ Files = $files; CloudOnly = $cloud; LocalGB = [math]::Round($bytes / 1GB, 2) }
+}
+
+# Known Folder Move: Desktop/Documents/Pictures dang tro vao folder OneDrive?
+function Get-KfmRedirects([string]$Folder) {
+    $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+    $hits = @()
+    if (Test-Path $k) {
+        $item = Get-ItemProperty $k
+        foreach ($prop in $item.PSObject.Properties) {
+            if ($prop.Name -like 'PS*') { continue }
+            $v = [string]$prop.Value
+            if ($v) { $v = [Environment]::ExpandEnvironmentVariables($v) }
+            if ($v -and $v.StartsWith($Folder + '\', 'OrdinalIgnoreCase')) { $hits += ("{0} -> {1}" -f $prop.Name, $v) }
+        }
+    }
+    return $hits
+}
+
+# <folder>_old, neu da ton tai -> _old2, _old3 ...
+function Get-OldFolderName([string]$Folder) {
+    $new = $Folder + '_old'
+    $i = 2
+    while (Test-Path -LiteralPath $new) { $new = "{0}_old{1}" -f $Folder, $i; $i++ }
+    return $new
+}
+
+# Bat OneDrive bang quyen user thuong (tool dang chay Admin -> tranh OneDrive bi elevated)
+function Start-OneDriveUser([string]$Exe) {
+    try { Start-Process -FilePath "$env:windir\explorer.exe" -ArgumentList ('"{0}"' -f $Exe) -ErrorAction Stop }
+    catch { Start-Process -FilePath $Exe -ArgumentList '/background' }
+}
+
+function OneDrive-Resync {
+    Draw-Header 'RESYNC ONEDRIVE'
+    $exe = Get-OneDriveExe
+    if (-not $exe) { Write-Err 'Khong tim thay OneDrive.exe.'; Pause-Back; return }
+    Write-Host "  OneDrive.exe: $exe" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-BoxSep 'Che do'
+    Write-BoxItem '[1] Resync day du: doi ten folder -> _old, tai lai'
+    Write-BoxItem '[2] Reset nhe: onedrive.exe /reset (giu nguyen folder)'
+    Write-BoxSep
+    Write-BoxItem '[0] Quay lai' 'Red'
+    Write-BoxSep
+    $mode = Read-Choice
+
+    if ($mode -eq '2') {
+        if (-not (Confirm-YN 'Reset OneDrive (file giu nguyen, sync lai tu dau)?')) { return }
+        Write-Step 'Dang chay OneDrive /reset ...'
+        try { Start-Process -FilePath $exe -ArgumentList '/reset' -ErrorAction Stop }
+        catch { Write-Err $_.Exception.Message; Pause-Back; return }
+        Wait-Countdown 15 'Cho OneDrive reset'
+        if (-not (Get-Process OneDrive -ErrorAction SilentlyContinue)) { Write-Step 'Bat lai OneDrive...'; Start-OneDriveUser $exe }
+        Write-Ok 'Da reset. OneDrive se mat vai phut de tu khoi dong va do lai danh sach file.'
+        Pause-Back
+        return
+    }
+    if ($mode -ne '1') { return }
+
+    # 1) Quet & chon folder
+    Write-Step 'Dang quet folder OneDrive tren may...'
+    $found = @(Get-OneDriveFolders)
+    if ($found.Count -eq 0) { Write-Warn 'Khong tim thay folder OneDrive nao.'; Pause-Back; return }
+    Write-Host ''
+    for ($i = 0; $i -lt $found.Count; $i++) {
+        Write-Host ("  [{0}] {1}" -f ($i + 1), $found[$i].Folder) -ForegroundColor Green
+        Write-Host ("      {0}  |  nguon: {1}" -f $found[$i].Label, $found[$i].Source) -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    $sel = Read-Host '  Chon so (vd: 1 hoac 1,2), A = tat ca, 0 = huy'
+    if ([string]::IsNullOrWhiteSpace($sel) -or $sel.Trim() -eq '0') { return }
+    $targets = @()
+    if ($sel.Trim() -match '^[aA]$') { $targets = $found }
+    else {
+        foreach ($tok in ($sel -split '[,\s]+' | Where-Object { $_ })) {
+            if ($tok -match '^\d+$' -and [int]$tok -ge 1 -and [int]$tok -le $found.Count) {
+                $item = $found[[int]$tok - 1]
+                if ($targets -notcontains $item) { $targets += $item }
+            } else { Write-Warn "Lua chon khong hop le: $tok"; Pause-Back; return }
+        }
+    }
+    if ($targets.Count -eq 0) { return }
+
+    # Canh bao truoc khi lam
+    $plan = @()
+    foreach ($t in $targets) {
+        Write-Host ''
+        Write-Host "  Dang kiem tra: $($t.Folder)" -ForegroundColor Cyan
+        $kfm = @(Get-KfmRedirects $t.Folder)
+        if ($kfm.Count -gt 0) {
+            Write-Warn 'Folder nay dang duoc dung cho Known Folder Move (Desktop/Documents/Pictures...):'
+            $kfm | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+            Write-Host '  Doi ten co the lam hong duong dan cac thu muc he thong tren.' -ForegroundColor Yellow
+            if (-not (Confirm-YN 'Van tiep tuc voi tai khoan nay (RAT KHONG khuyen nghi)?')) { Write-Host '  Bo qua.' -ForegroundColor DarkGray; continue }
+        }
+        $st = Get-FolderSyncStats $t.Folder
+        Write-Host ("  {0} file | {1} GB local | {2} file cloud-only (se KHONG mo duoc trong folder _old)" -f $st.Files, $st.LocalGB, $st.CloudOnly) -ForegroundColor White
+        $plan += [pscustomobject]@{ Email = $t.Label; Folder = $t.Folder; NewFolder = (Get-OldFolderName $t.Folder) }
+    }
+    if ($plan.Count -eq 0) { Pause-Back; return }
+
+    $busy = @(Get-Process WINWORD,EXCEL,POWERPNT,ONENOTE,OUTLOOK,Acrobat,AcroRd32 -ErrorAction SilentlyContinue)
+    if ($busy.Count -gt 0) {
+        Write-Warn ("Dang mo: {0} - nen luu & dong truoc de tranh loi doi ten." -f (($busy.Name | Sort-Object -Unique) -join ', '))
+    }
+    Write-Host ''
+    Write-Host '  Se thuc hien:' -ForegroundColor Cyan
+    $plan | ForEach-Object { Write-Host ("    {0}`n      -> {1}" -f $_.Folder, $_.NewFolder) -ForegroundColor White }
+    Write-Host '  File chua kip upload van nam trong folder _old - hay doi chieu lai sau khi sync xong.' -ForegroundColor DarkGray
+    if (-not (Confirm-YN 'Xac nhan resync?')) { return }
+
+    # 2) Tat toan bo tien trinh OneDrive
+    Write-Step 'Tat OneDrive va cac tien trinh lien quan...'
+    if (-not (Stop-OneDriveAll $exe)) { Write-Err 'Con tien trinh OneDrive chua tat duoc. Dung lai de tranh hong du lieu.'; Pause-Back; return }
+    Write-Ok 'Da tat het tien trinh OneDrive.'
+
+    Write-Step 'Quet handle dang mo tren folder (giong Resource Monitor > Associated Handles)...'
+    $handleExe = Get-HandleExe
+    if (-not $handleExe) { Write-Warn 'Khong tai duoc handle64.exe (can Internet). Bo qua buoc quet handle - co the van bi Access denied.' }
+
+    # 3) Doi ten folder
+    Write-Step 'Doi ten folder...'
+    foreach ($p in $plan) {
+        $done = $false
+        for ($try = 1; $try -le 3 -and -not $done; $try++) {
+            if ($handleExe) {
+                Write-Host "  Quet & tat process giu handle: $($p.Folder)" -ForegroundColor Cyan
+                if (-not (Stop-FolderHandleHolders $p.Folder $handleExe)) { Write-Warn 'Van con process giu handle (xem canh bao o tren).' }
+            }
+            try {
+                Rename-Item -LiteralPath $p.Folder -NewName (Split-Path $p.NewFolder -Leaf) -ErrorAction Stop
+                Write-Ok ("{0}  ->  {1}" -f $p.Folder, $p.NewFolder)
+                $done = $true
+            } catch {
+                if ($try -lt 3) { Start-Sleep -Seconds 2 }
+                else { Write-Err ("Khong doi ten duoc {0}: {1}" -f $p.Folder, $_.Exception.Message); Write-Host '  Con process giu handle: mo Resource Monitor > CPU > Associated Handles de kiem tra.' -ForegroundColor DarkGray }
+            }
+        }
+    }
+
+    # 4) Cho 5s roi bat lai
+    Wait-Countdown 5 'Cho truoc khi bat lai OneDrive'
+    Write-Step 'Bat lai OneDrive...'
+    try { Start-OneDriveUser $exe; Start-Sleep -Seconds 3 } catch { Write-Err $_.Exception.Message }
+    if (Get-Process OneDrive -ErrorAction SilentlyContinue) { Write-Ok 'OneDrive dang chay.' } else { Write-Warn 'OneDrive chua len - hay mo thu cong tu Start Menu.' }
+    Write-Host ''
+    Write-Host '  Luu y: neu OneDrive hoi dang nhap/vi tri folder, chon dung duong dan cu de tai lai du lieu.' -ForegroundColor Yellow
+    Pause-Back
+}
+
+# ------------------------------------------------------------
+# 7. MICROSOFT 365 LOCAL DIAGNOSTICS
+# ------------------------------------------------------------
+function M365-Diagnostics {
+    while ($true) {
+        Draw-Header 'MICROSOFT 365 DIAGNOSTICS'
+        Write-BoxSep 'Kiem tra tren may tram'
+        Write-BoxItem '[1] Outlook / Office process & version'
+        Write-BoxItem '[2] Outlook profile names (Registry)'
+        Write-BoxItem '[3] OneDrive status & process'
+        Write-BoxItem '[4] Resync OneDrive (doi ten folder -> _old)' 'Green'
+        Write-BoxItem '[5] Teams status & process'
+        Write-BoxItem '[6] M365 DNS / Autodiscover / MX check'
+        Write-BoxItem '[7] Microsoft 365 endpoint connectivity'
+        Write-BoxItem '[8] Export M365 local diagnostic report'
+        Write-BoxSep
+        Write-BoxItem '[0] Quay lai' 'Red'
+        Write-BoxSep
+        switch (Read-Choice) {
+            '1' {
+                Draw-Header 'OFFICE / OUTLOOK STATUS'
+                Get-Process OUTLOOK,WINWORD,EXCEL,POWERPNT,ONENOTE -ErrorAction SilentlyContinue | Select-Object Name,Id,StartTime,Path | Format-Table -AutoSize
+                $cv = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+                if (Test-Path $cv) { Get-ItemProperty $cv | Select-Object VersionToReport,ProductReleaseIds,Platform,ClientVersionToReport | Format-List }
+                else { Write-Warn 'Khong tim thay Click-to-Run configuration; co the la Office MSI hoac chua cai.' }
+                Pause-Back
+            }
+            '2' {
+                Draw-Header 'OUTLOOK PROFILES'
+                $base = 'HKCU:\Software\Microsoft\Office\16.0\Outlook\Profiles'
+                if (Test-Path $base) { Get-ChildItem $base -ErrorAction SilentlyContinue | Select-Object -ExpandProperty PSChildName | ForEach-Object { Write-Host "  $_" } }
+                else { Write-Warn 'Khong tim thay Outlook profile registry (Office 16.0).'}
+                Pause-Back
+            }
+            '3' {
+                Draw-Header 'ONEDRIVE STATUS'
+                Get-Process OneDrive -ErrorAction SilentlyContinue | Select-Object Name,Id,StartTime,Path | Format-Table -AutoSize
+                $od = @("$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe", "$env:ProgramFiles\Microsoft OneDrive\OneDrive.exe", "${env:ProgramFiles(x86)}\Microsoft OneDrive\OneDrive.exe") | Where-Object { $_ -and (Test-Path $_) }
+                $od | ForEach-Object { Write-Host "  Installed: $_" -ForegroundColor Green }
+                if (-not $od) { Write-Warn 'Khong tim thay OneDrive.exe tai cac vi tri mac dinh.' }
+                Pause-Back
+            }
+            '4' { OneDrive-Resync }
+            '5' {
+                Draw-Header 'TEAMS STATUS'
+                Get-Process Teams,ms-teams -ErrorAction SilentlyContinue | Select-Object Name,Id,StartTime,Path | Format-Table -AutoSize
+                foreach ($path in @("$env:LOCALAPPDATA\Microsoft\Teams", "$env:LOCALAPPDATA\Packages\MSTeams_8wekyb3d8bbwe")) { if (Test-Path $path) { Write-Host "  Found: $path" } }
+                Pause-Back
+            }
+            '6' {
+                Draw-Header 'M365 DNS CHECK'
+                $domain = Read-Host 'Nhap domain email (vd: contoso.com)'
+                if ($domain -match '^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$') {
+                    foreach ($name in @("autodiscover.$domain", $domain)) {
+                        Write-Host "`n  DNS: $name" -ForegroundColor Yellow
+                        try { Resolve-DnsName $name -ErrorAction Stop | Select-Object Name,Type,NameHost,IPAddress,Preference | Format-Table -AutoSize }
+                        catch { Write-Warn "Khong resolve duoc $name" }
+                    }
+                    Write-Host "`n  MX: $domain" -ForegroundColor Yellow
+                    try { Resolve-DnsName $domain -Type MX -ErrorAction Stop | Select-Object Name,NameExchange,Preference | Format-Table -AutoSize }
+                    catch { Write-Warn 'Khong tim thay MX record hoac DNS query that bai.' }
+                    Write-Host "`n  Autodiscover SRV: _autodiscover._tcp.$domain" -ForegroundColor Yellow
+                    try { Resolve-DnsName "_autodiscover._tcp.$domain" -Type SRV -ErrorAction Stop | Select-Object Name,NameTarget,Port,Priority,Weight | Format-Table -AutoSize }
+                    catch { Write-Host '  Khong co SRV record (khong bat buoc neu dung CNAME).' -ForegroundColor DarkGray }
+                } else { Write-Warn 'Domain khong hop le.' }
+                Pause-Back
+            }
+            '7' {
+                Draw-Header 'M365 ENDPOINT CONNECTIVITY'
+                $targets = @('outlook.office365.com','login.microsoftonline.com','teams.microsoft.com','graph.microsoft.com','sharepoint.com')
+                foreach ($target in $targets) {
+                    $r = Test-NetConnection $target -Port 443 -WarningAction SilentlyContinue
+                    $status = if ($r.TcpTestSucceeded) { 'OK' } else { 'FAILED' }
+                    $color = if ($r.TcpTestSucceeded) { 'Green' } else { 'Red' }
+                    Write-Host ('  {0,-34} TCP/443 {1}' -f $target,$status) -ForegroundColor $color
+                }
+                Write-Host '  Luu y: day la kiem tra ket noi co ban, khong thay the Microsoft 365 connectivity test chinh thuc.' -ForegroundColor DarkGray
+                Pause-Back
+            }
+            '8' {
+                $file = Join-Path $env:USERPROFILE ("Desktop\M365_LocalReport_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                $out = New-Object System.Collections.Generic.List[string]
+                $out.Add('M365 LOCAL REPORT - ' + (Get-Date))
+                $out.Add('Computer: ' + $env:COMPUTERNAME)
+                $out.Add('=== OFFICE PROCESSES ===')
+                $out.Add((Get-Process OUTLOOK,WINWORD,EXCEL,POWERPNT,Teams,ms-teams,OneDrive -ErrorAction SilentlyContinue | Format-List Name,Id,StartTime,Path | Out-String))
+                $out.Add('=== OFFICE C2R ===')
+                $cv = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+                if (Test-Path $cv) { $out.Add((Get-ItemProperty $cv | Select-Object VersionToReport,ProductReleaseIds,Platform | Format-List | Out-String)) }
+                $out | Set-Content -Path $file -Encoding UTF8
+                Write-Ok "Da xuat: $file"
+                Pause-Back
+            }
+            '0' { return }
+        }
+    }
+}
+
 # ------------------------------------------------------------
 # 4. SYSINTERNALS LIVE
 # ------------------------------------------------------------
@@ -1182,15 +2031,21 @@ while (-not $quit) {
     Write-BoxItem '[2] SYSTEM CLEANUP    - Don dep Temp, Cache, WinSxS'
     Write-BoxItem '[3] IT & SYSTEM TOOLS - License Office, Spooler, RDP'
     Write-BoxItem '[4] SYSINTERNALS LIVE - Process Explorer, Autoruns'
+    Write-BoxItem '[5] WINDOWS REPAIR    - SFC, DISM, Update, Event Log'
+    Write-BoxItem '[6] SYSTEM MONITOR    - CPU, RAM, Disk, Process, Report'
+    Write-BoxItem '[7] MICROSOFT 365     - Outlook, Teams, OneDrive, DNS'
     Write-BoxSep
     Write-BoxItem '[0] THOAT' 'Red'
     Write-BoxSep
 
-    switch (Read-Choice 'Chon danh muc (0-4)') {
+    switch (Read-Choice 'Chon danh muc (0-7)') {
         '1' { Menu-Network }
         '2' { Menu-Cleanup }
         '3' { Menu-ITTools }
         '4' { Menu-Sysinternals }
+        '5' { Win-RepairMenu }
+        '6' { Menu-SystemMonitor }
+        '7' { M365-Diagnostics }
         '0' { $quit = $true }
         default { Write-Warn 'Lua chon khong hop le!'; Start-Sleep -Seconds 1 }
     }
