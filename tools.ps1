@@ -283,6 +283,113 @@ function Resolve-Ipv4($hostOrIp) {
     return $null
 }
 
+
+# ---------------- QUICK DNS SWITCH ----------------
+function Net-ChangeDNS {
+    Draw-Header 'CHANGE DNS - QUICK SWITCH'
+
+    $dnsProfiles = @{
+        '1' = @{ Name = 'Cloudflare'; Primary = '1.1.1.1'; Secondary = '1.0.0.1' }
+        '2' = @{ Name = 'Google';     Primary = '8.8.8.8'; Secondary = '8.8.4.4' }
+        '3' = @{ Name = 'NextDNS';    Primary = '45.90.28.0'; Secondary = '45.90.30.0' }
+        '4' = @{ Name = 'AdGuard';    Primary = '94.140.14.14'; Secondary = '94.140.15.15' }
+        '5' = @{ Name = 'Quad9';      Primary = '9.9.9.9'; Secondary = '149.112.112.112' }
+        '6' = @{ Name = 'OpenDNS';    Primary = '208.67.222.222'; Secondary = '208.67.220.220' }
+    }
+
+    Write-BoxSep 'DNS Provider'
+    Write-BoxItem '[1] Cloudflare       1.1.1.1 / 1.0.0.1'
+    Write-BoxItem '[2] Google           8.8.8.8 / 8.8.4.4'
+    Write-BoxItem '[3] NextDNS          45.90.28.0 / 45.90.30.0'
+    Write-BoxItem '[4] AdGuard DNS      94.140.14.14 / 94.140.15.15'
+    Write-BoxItem '[5] Quad9            9.9.9.9 / 149.112.112.112'
+    Write-BoxItem '[6] OpenDNS          208.67.222.222 / 208.67.220.220'
+    Write-BoxItem '[7] Restore Automatic DNS (DHCP)' 'Yellow'
+    Write-BoxItem '[0] Huy' 'Red'
+    Write-BoxSep
+
+    $choice = Read-Choice 'Chon DNS'
+    if ($choice -eq '0' -or [string]::IsNullOrWhiteSpace($choice)) { return }
+    if ($choice -notmatch '^[1-7]$') { Write-Warn 'Lua chon khong hop le.'; return }
+
+    $nextDnsId = $null
+    if ($choice -eq '3') {
+        Write-Host ''
+        Write-Host '  NextDNS: de trong = DNS IPv4 thong thuong (can Link IP tren dashboard NextDNS).' -ForegroundColor DarkGray
+        Write-Host '  Nhap Configuration ID = cau hinh DoH ca nhan tren Windows 11.' -ForegroundColor DarkGray
+        $nextDnsId = (Read-Host '  NextDNS Configuration ID (Enter = bo qua DoH)').Trim()
+        if ($nextDnsId -and $nextDnsId -notmatch '^[A-Za-z0-9]{6}$') {
+            Write-Err 'Configuration ID khong hop le (NextDNS ID thuong gom 6 ky tu).'
+            return
+        }
+        if ($nextDnsId -and [Environment]::OSVersion.Version.Build -lt 22000) {
+            Write-Warn 'Windows nay khong duoc tool bat DoH native. Se khong ap dung ID; hay dung NextDNS app/CLI hoac de trong de dung DNS IPv4.'
+            return
+        }
+    }
+
+    $sel = @(Select-PhysicalNic)
+    if ($sel.Count -eq 0) { return }
+
+    Write-Host ''
+    Write-BoxSep 'DNS hien tai'
+    foreach ($nic in $sel) {
+        $current = @(Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.ServerAddresses } | Where-Object { $_ })
+        Write-Host ('  {0}: {1}' -f $nic.Name, $(if ($current.Count) { $current -join ', ' } else { '(chua co DNS IPv4)' }))
+    }
+
+    if ($choice -eq '7') {
+        $label = 'Automatic DNS (DHCP)'
+    } else {
+        $profile = $dnsProfiles[$choice]
+        $label = $profile.Name
+    }
+    Write-Host ''
+    Write-Host ('  Se ap dung: {0}' -f $label) -ForegroundColor Yellow
+    if ($choice -ne '7') {
+        Write-Host ('  IPv4 DNS: {0}, {1}' -f $profile.Primary, $profile.Secondary)
+        if ($choice -eq '3' -and $nextDnsId) { Write-Host ('  DoH template: https://dns.nextdns.io/{0}' -f $nextDnsId) -ForegroundColor Cyan }
+    }
+    Write-Warn 'Chi thay DNS IPv4; khong thay IP, Gateway hay DNS IPv6.'
+    if (-not (Confirm-YN 'Xac nhan ap dung?')) { return }
+
+    foreach ($nic in $sel) {
+        try {
+            if ($choice -eq '7') {
+                Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ResetServerAddresses -ErrorAction Stop
+                Write-Ok ("{0}: da tra DNS ve DHCP." -f $nic.Name)
+            } else {
+                Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses @($profile.Primary, $profile.Secondary) -ErrorAction Stop
+                Write-Ok ("{0}: da doi DNS sang {1}." -f $nic.Name, $profile.Name)
+            }
+        } catch {
+            Write-Err ("{0}: {1}" -f $nic.Name, $_.Exception.Message)
+        }
+    }
+
+    # NextDNS DoH: dang ky template cho ca hai IPv4 resolver tren Windows 11.
+    if ($choice -eq '3' -and $nextDnsId) {
+        $template = "https://dns.nextdns.io/$nextDnsId"
+        foreach ($server in @($profile.Primary, $profile.Secondary)) {
+            & netsh.exe dnsclient add encryption "server=$server" "dohtemplate=$template" autoupgrade=yes udpfallback=no | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Da dang ky NextDNS DoH cho $server." }
+            else { Write-Warn "Khong dang ky duoc DoH cho $server. Kiem tra Windows/netsh." }
+        }
+        & netsh.exe dnsclient set global doh=yes | Out-Null
+    }
+
+    ipconfig.exe /flushdns | Out-Null
+    Write-Host ''
+    Write-BoxSep 'DNS sau khi thay doi'
+    foreach ($nic in $sel) {
+        $after = @(Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.ServerAddresses } | Where-Object { $_ })
+        Write-Host ('  {0}: {1}' -f $nic.Name, $(if ($after.Count) { $after -join ', ' } else { '(Automatic/DHCP)' })) -ForegroundColor Green
+    }
+    Write-Ok 'Da flush DNS cache.'
+}
+
 function Net-FixVpnRoute {
     Draw-Header 'FIX ROUTE VPN'
 
@@ -483,10 +590,11 @@ function Menu-Network {
         Write-BoxItem '[2] Reset Network Card (Disable/Enable)'
         Write-BoxItem '[3] Reconnect Network Drive (quyen User)'
         Write-BoxItem '[4] Fix Route VPN (Dinh tuyen cho VPN)'
+        Write-BoxItem '[5] Quick Change DNS (Cloudflare/Google/NextDNS...)' 'Green'
         Write-BoxSep 'Chuan doan IT'
-        Write-BoxItem '[5] Ping / Tracert kiem tra ket noi' 'Yellow'
-        Write-BoxItem '[6] Cong dang mo (Open Ports & Connections)' 'Yellow'
-        Write-BoxItem '[7] Nmap - Quet thiet bi / port trong mang' 'Cyan'
+        Write-BoxItem '[6] Ping / Tracert kiem tra ket noi' 'Yellow'
+        Write-BoxItem '[7] Cong dang mo (Open Ports & Connections)' 'Yellow'
+        Write-BoxItem '[8] Nmap - Quet thiet bi / port trong mang' 'Cyan'
         Write-BoxSep
         Write-BoxItem '[0] Quay lai Menu chinh' 'Red'
         Write-BoxSep
@@ -496,9 +604,10 @@ function Menu-Network {
             '2' { Net-RefreshNic; Pause-Back }
             '3' { Net-ReconnectDrives; Pause-Back }
             '4' { Net-FixVpnRoute; Pause-Back }
-            '5' { Net-Diagnostics; Pause-Back }
-            '6' { Net-PortCheck; Pause-Back }
-            '7' { Net-Nmap; Pause-Back }
+            '5' { Net-ChangeDNS; Pause-Back }
+            '6' { Net-Diagnostics; Pause-Back }
+            '7' { Net-PortCheck; Pause-Back }
+            '8' { Net-Nmap; Pause-Back }
             '0' { return }
         }
     }
